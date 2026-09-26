@@ -1,0 +1,1019 @@
+// dsh-ssh-remote 冒烟测试：全 fake spawn，不碰网络与真实 ssh。
+// 运行前先 `npm run setup-dev`（node_modules 符号链接提供 peer 依赖）。
+import { EventEmitter } from 'node:events'
+
+let passed = 0
+let failed = 0
+const failures = []
+export function check(name, cond, detail) {
+  if (cond) { passed += 1; console.log('  PASS ' + name) }
+  else { failed += 1; failures.push(name); console.log('  FAIL ' + name + (detail !== undefined ? '  <- ' + detail : '')) }
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+
+/** fake 子进程：手动 emitExit / emitClose / writeOut / writeErr */
+export function fakeChild(pid) {
+  const child = new EventEmitter()
+  child.pid = pid
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  // Transfer._tarPipe 用 producer.stdout.pipe(consumer.stdin)；fake 下给最小桩（不影响其他组）
+  child.stdout.pipe = (dst) => { child.__pipedTo = dst; return dst }
+  child.killed = false
+  child.kill = () => { child.killed = true; return true }
+  child.emitExit = (code, signal) => child.emit('exit', code, signal || null)
+  child.emitClose = (code) => child.emit('close', code)
+  child.writeOut = (s) => child.stdout.emit('data', Buffer.from(s, 'utf8'))
+  child.writeErr = (s) => child.stderr.emit('data', Buffer.from(s, 'utf8'))
+  child.stdin = {
+    write: (s) => { child.__stdin = (child.__stdin || '') + s },
+    end: () => {},
+    on: () => {}, // 对齐真实 Writable 的 EventEmitter 接口（EPIPE 监听用）
+  }
+  return child
+}
+
+/** 记录型 spawnFn */
+export function recordingSpawn(log) {
+  return (cmd, args, opts) => {
+    const child = fakeChild(9000 + log.length)
+    log.push({ cmd, args, opts, child })
+    return child
+  }
+}
+
+export { sleep, EventEmitter }
+export function summary() {
+  console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败')
+  if (failed > 0) { failures.forEach(f => console.log('  - ' + f)); process.exitCode = 1 }
+}
+export function counts() { return { passed, failed } }
+
+// ================= T2 exec.js =================
+import { shellQuote, cleanSshStderr, classifyError, Runner } from '../lib/exec.js'
+
+async function t2() {
+  console.log('== T2 exec.js ==')
+  check('T2.1 shellQuote 单引号转义', shellQuote("a'b") === "'a'\\''b'", shellQuote("a'b"))
+  check('T2.2 shellQuote 普通串', shellQuote('/srv/app') === "'/srv/app'")
+  check('T2.3 cleanSshStderr 过滤良性噪音', cleanSshStderr('warn: post-quantum stuff\nreal error').includes('real error') && !cleanSshStderr('warn: post-quantum stuff\nreal error').includes('post-quantum'))
+  check('T2.4 classify unreachable', classifyError('ssh: connect to host x port 22: Connection timed out', -1) === 'unreachable')
+  check('T2.5 classify auth', classifyError('user@h: Permission denied (publickey).', 255) === 'auth')
+  check('T2.6 classify stale-edit', classifyError('', 75) === 'stale-edit')
+
+  const log = []
+  const runner = new Runner({
+    muxArgs: () => ['-o', 'ControlPath=/tmp/x.sock'],
+    target: () => 'root@1.2.3.4',
+    spawnFn: recordingSpawn(log),
+    defaults: { commandTimeoutMs: 5000, maxStdout: 1024, maxStderr: 256 },
+  })
+  const host = { id: 'h1', user: 'root', host: '1.2.3.4', port: 22, identityFile: '/k', defaultCwd: '/srv' }
+
+  // 正常执行 + defaultCwd 前缀
+  const p1 = runner.run(host, 'hostname', {})
+  setTimeout(() => { log[0].child.writeOut('srv1\n'); log[0].child.emitClose(0) }, 5)
+  const r1 = await p1
+  check('T2.7 run 返回 exitCode/stdout', r1.exitCode === 0 && r1.stdout === 'srv1\n', JSON.stringify(r1))
+  check('T2.8 defaultCwd 变 cd 前缀', log[0].args.includes("cd '/srv' && hostname") || log[0].args.some(a => a === "cd '/srv' && hostname"), log[0].args.join(' '))
+  check('T2.9 命令为最后一个参数', log[0].args[log[0].args.length - 1] === "cd '/srv' && hostname")
+  check('T2.10 复用 mux 参数', log[0].args.includes('ControlPath=/tmp/x.sock'))
+
+  // cwd 参数覆盖 + 引号
+  const p2 = runner.run(host, 'ls', { cwd: "a'b" })
+  setTimeout(() => log[1].child.emitClose(0), 5)
+  await p2
+  check('T2.11 cwd 覆盖并转义', log[1].args.some(a => a === "cd 'a'\\''b' && ls"), log[1].args.join(' '))
+
+  // 超时
+  const r3 = await runner.run(host, 'sleep 999', { timeoutMs: 60 })
+  check('T2.12 超时 kill 并标记', r3.timedOut === true && r3.exitCode === -1 && log[2].child.killed === true, JSON.stringify(r3))
+
+  // 错误分类透传（I1 收紧后须为 ssh 官方格式 user@host: 前缀）
+  const p4 = runner.run(host, 'x', {})
+  setTimeout(() => { log[3].child.writeErr('root@1.2.3.4: Permission denied (publickey).'); log[3].child.emitClose(255) }, 5)
+  const r4 = await p4
+  check('T2.13 auth 分类', r4.errorKind === 'auth', JSON.stringify(r4))
+
+  // runWithStdin：stdin 透传给远端
+  const p5 = runner.runWithStdin(host, 'cat > /tmp/f', { stdin: 'hello' })
+  setTimeout(() => { log[4].child.emitClose(0) }, 5)
+  const r5 = await p5
+  check('T2.14 stdin 写入', r5.exitCode === 0 && log[4].child.__stdin === 'hello', JSON.stringify(r5))
+  check('T2.15 spawn 参数数组无 shell', log[0].cmd === 'ssh')
+
+  // EPIPE 回归：子进程秒退 + 在途 stdin 大载荷不崩（真实 spawn /usr/bin/true）
+  {
+    const { spawn: realSpawn } = await import('node:child_process')
+    const epRunner = new Runner({
+      muxArgs: () => [], target: () => 't@h',
+      spawnFn: (cmd, args, o) => realSpawn('true', [], o),
+      defaults: { commandTimeoutMs: 2000, maxStdout: 1024, maxStderr: 256 },
+    })
+    const rE = await epRunner.runWithStdin(host, 'noop', { stdin: 'x'.repeat(1024 * 1024) })
+    check('T2.16 stdin EPIPE 不崩（秒退子进程+1MB 载荷）', rE.exitCode === 0, JSON.stringify(rE))
+    check('T2.17 spawn 无 shell 选项', log[0].opts.shell === undefined)
+  }
+
+  // 截断标志回归
+  {
+    const logB = []
+    const r2 = new Runner({
+      muxArgs: () => [], target: () => 't@h',
+      spawnFn: recordingSpawn(logB),
+      defaults: { commandTimeoutMs: 2000, maxStdout: 64, maxStderr: 256 },
+    })
+    const pT = r2.run(host, 'cat big', {})
+    setTimeout(() => { for (let i = 0; i < 20; i++) logB[0].child.writeOut('x'.repeat(16) + '\n'); logB[0].child.emitClose(0) }, 5)
+    const rT = await pT
+    check('T2.18 stdout 截断置标志', rT.stdoutTruncated === true && rT.stdout.length <= 64, JSON.stringify({ len: rT.stdout.length, t: rT.stdoutTruncated }))
+  }
+}
+
+// ================= T3 hosts.js =================
+import * as os from 'node:os'
+import * as path from 'node:path'
+import * as fs from 'node:fs'
+import { normalizeHost, validateHosts, mergeHosts, HostRegistry } from '../lib/hosts.js'
+
+async function t3() {
+  console.log('== T3 hosts.js ==')
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-test-'))
+  const hostsFile = path.join(tmpDir, 'hosts.json')
+
+  const h = normalizeHost({ id: 'Prod_1', host: '1.2.3.4', identityFile: '~/k' })
+  check('T3.1 id 非法字符报错', h === null)
+  const h2 = normalizeHost({ id: 'prod-1', name: '生产', host: '1.2.3.4', identityFile: '~/k', port: 2222, jump: 'bastion' })
+  check('T3.2 归一化默认值', h2.user === 'root' && h2.port === 2222 && h2.connectTimeoutSec === 15 && h2.controlPersistSec === 600 && h2.jump === 'bastion')
+  check('T3.3 ~ 展开', h2.identityFile === path.join(os.homedir(), 'k'), h2.identityFile)
+
+  const errs = validateHosts([
+    { id: 'a', host: 'h', identityFile: 'k', jump: 'b' },
+    { id: 'b', host: 'h', identityFile: 'k', jump: 'a' },
+    { id: 'a', host: 'h', identityFile: 'k' },
+    { id: 'bad id', host: 'h', identityFile: 'k' },
+  ])
+  check('T3.4 环检测', errs.some(e => e.includes('jump 成环')), errs.join(';'))
+  check('T3.5 id 重复检测', errs.some(e => e.includes('重复')), errs.join(';'))
+  check('T3.6 id 含空格被拒（normalizeHost）', normalizeHost({ id: 'bad id', host: 'h', identityFile: 'k' }) === null)
+
+  const merged = mergeHosts(
+    [{ id: 'a', host: 'h', identityFile: 'k', at: 'static' }],
+    [{ id: 'a', host: 'h2', identityFile: 'k2' }, { id: 'c', host: 'h3', identityFile: 'k3' }]
+  )
+  check('T3.7 静态优先去重', merged.length === 2 && merged[0].host === 'h' && merged[1].id === 'c')
+
+  // 注册表：动态文件读写 + pick + 热重载
+  fs.writeFileSync(hostsFile, JSON.stringify([{ id: 'dyn-1', host: '5.6.7.8', identityFile: '/k' }]), 'utf8')
+  const reg = new HostRegistry({ staticHosts: [{ id: 'st-1', host: 'h', identityFile: 'k' }], hostsFile })
+  check('T3.8 合并读取', reg.list().length === 2 && reg.list()[0].id === 'st-1')
+  check('T3.9 pick 缺省第一条', reg.pick().id === 'st-1')
+  check('T3.10 pick 按 id', reg.pick('dyn-1').id === 'dyn-1')
+  let pickErr = null
+  try { reg.pick('nope') } catch (e) { pickErr = e }
+  check('T3.11 未知 id 报错并列出可用', String(pickErr.message).includes('st-1') && String(pickErr.message).includes('dyn-1'))
+  let reloaded = false
+  reg.startWatch(() => { reloaded = true })
+  await sleep(50)
+  fs.writeFileSync(hostsFile + '.tmp-x', JSON.stringify([{ id: 'dyn-2', host: '9.9.9.9', identityFile: '/k' }]), 'utf8')
+  fs.renameSync(hostsFile + '.tmp-x', hostsFile)
+  await sleep(400)
+  check('T3.12 热重载生效', reg.list().length === 2 && reg.list().some(x => x.id === 'dyn-2') && reg.list().every(x => x.id !== 'dyn-1'))
+  check('T3.13 热重载回调触发', reloaded === true)
+  // I-1 回归：文件删除/损坏后动态表清空
+  fs.rmSync(hostsFile, { force: true })
+  reg.reload()
+  check('T3.14 文件删除后动态表清空', reg.list().length === 1 && reg.list()[0].id === 'st-1')
+  fs.writeFileSync(hostsFile, '{corrupted', 'utf8')
+  reg.reload()
+  check('T3.15 损坏 JSON 后动态表清空', reg.list().length === 1)
+  fs.writeFileSync(hostsFile, '[]', 'utf8')
+  reg.stopWatch()
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+// ================= T4 settings-store.js =================
+import { atomicWriteJson, readHostsFile, parseImport } from '../lib/settings-store.js'
+
+async function t4() {
+  console.log('== T4 settings-store.js ==')
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t4-'))
+  const f = path.join(tmpDir, 'sub', 'hosts.json')
+  atomicWriteJson(f, [{ id: 'x', host: '1.1.1.1', identityFile: '/k' }])
+  check('T4.1 原子写建目录+落盘', JSON.parse(fs.readFileSync(f, 'utf8'))[0].id === 'x')
+  check('T4.2 readHostsFile', readHostsFile(f).length === 1)
+  check('T4.3 readHostsFile 缺文件容忍', readHostsFile(path.join(tmpDir, 'none.json')).length === 0)
+
+  // JSON 导入
+  const j = parseImport('[{"id":"j1","host":"1.2.3.4","identityFile":"/k","port":2222}]', 'json')
+  check('T4.4 json 导入', j.hosts.length === 1 && j.hosts[0].port === 2222 && j.errors.length === 0)
+  const j2 = parseImport('{"hosts":[{"id":"j2","host":"h","identityFile":"/k"}]}', 'json')
+  check('T4.5 json 对象包裹形态', j2.hosts.length === 1)
+
+  // YAML 子集导入
+  const y = parseImport([
+    '# 注释',
+    "- id: y1",
+    "  name: '生产 1'",
+    "  host: 1.2.3.4",
+    "  identityFile: ~/.ssh/id_ed25519",
+    "  port: 22",
+  ].join('\n'), 'yaml')
+  check('T4.6 yaml 导入', y.hosts.length === 1 && y.hosts[0].name === '生产 1' && y.hosts[0].port === 22 && y.errors.length === 0, JSON.stringify(y))
+
+  // ssh_config 导入
+  const sc = parseImport([
+    'Host bastion',
+    '  HostName 203.0.113.7',
+    '  User ops',
+    '  Port 2222',
+    '  IdentityFile ~/.ssh/bastion_key',
+    '',
+    'Host web-01',
+    '  HostName 10.0.0.5',
+    '  IdentityFile ~/.ssh/web_key',
+    '  ProxyJump bastion',
+    '',
+    'Host *',
+    '  ServerAliveInterval 60',
+  ].join('\n'), 'sshconfig')
+  check('T4.7 sshconfig 解析两条', sc.hosts.length === 2, JSON.stringify(sc))
+  const bas = sc.hosts.find(h => h.id === 'bastion')
+  const web = sc.hosts.find(h => h.id === 'web-01')
+  check('T4.8 字段映射', bas.host === '203.0.113.7' && bas.user === 'ops' && bas.port === 2222)
+  check('T4.9 ProxyJump 转 jump 引用', web.jump === 'bastion')
+  check('T4.10 缺省 user/root', web.user === 'root')
+  check('T4.11 通配 Host 跳过', !sc.hosts.some(h => h.id === '*'))
+
+  // 回归：= 分隔 / 多别名 / 注释 / 大小写 / 异常分支
+  const eq = parseImport('Host=x\nHostName=1.2.3.4\nIdentityFile=/k\n', 'sshconfig')
+  check('T4.12 = 分隔语法解析', eq.hosts.length === 1 && eq.hosts[0].host === '1.2.3.4', JSON.stringify(eq))
+  const eq2 = parseImport('Host = y\n HostName = 2.2.2.2\n IdentityFile = /k\n', 'sshconfig')
+  check('T4.13 「Host = y」形态干净', eq2.hosts.length === 1 && eq2.hosts[0].id === 'y' && eq2.hosts[0].host === '2.2.2.2', JSON.stringify(eq2))
+  const multi = parseImport('Host web-01 www\n  HostName 10.0.0.5\n  IdentityFile /k\n', 'sshconfig')
+  check('T4.14 多别名各成主机', multi.hosts.length === 2 && multi.hosts.every(h => h.host === '10.0.0.5'), JSON.stringify(multi))
+  const y2 = parseImport("- id: c1\n  host: 1.1.1.1\n  identityFile: /k\n  port: 22 # 备注\n", 'yaml')
+  check('T4.15 YAML 行内注释剥离', y2.hosts.length === 1 && y2.hosts[0].port === 22, JSON.stringify(y2))
+  const crlf = parseImport("- id: c2\r\n  host: 1.1.1.1\r\n  identityFile: /k\r\n", 'yaml')
+  check('T4.16 CRLF 容忍', crlf.hosts.length === 1, JSON.stringify(crlf))
+  const bad = parseImport('{invalid json', 'json')
+  check('T4.17 JSON 解析失败报错', bad.hosts.length === 0 && bad.errors.length === 1 && bad.errors[0].includes('解析失败'))
+  const ci = parseImport('Host Bastion\n  HostName 203.0.113.7\n  IdentityFile /k\n\nHost web-02\n  HostName 10.0.0.9\n  IdentityFile /k\n  ProxyJump bastion\n', 'sshconfig')
+  check('T4.18 ProxyJump 大小写不敏感', ci.hosts.find(h => h.id === 'web-02').jump === 'bastion', JSON.stringify(ci))
+  const perr = parseImport('Host p1\n  HostName 1.1.1.1\n  IdentityFile /k\n  Port abc\n', 'sshconfig')
+  check('T4.19 Port 非数字记错误', perr.errors.some(e => e.includes('Port 非数字')), JSON.stringify(perr))
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+// ================= T5 connection.js =================
+import { ConnectionManager } from '../lib/connection.js'
+
+function connOpts(log, over = {}) {
+  return Object.assign({
+    platform: 'darwin',
+    cmDir: '/tmp/cm-test',
+    spawnFn: recordingSpawn(log),
+    sleepMs: 0.02,
+    probeIntervalMs: 30,
+    connectFloorMs: 400,
+  }, over)
+}
+
+async function t5() {
+  console.log('== T5 connection.js ==')
+  const H = { id: 'h1', host: '1.2.3.4', user: 'root', port: 22, identityFile: '/key', jump: '', connectTimeoutSec: 2, controlPersistSec: 600 }
+
+  // 参数组装
+  {
+    const c = new ConnectionManager(connOpts([]))
+    const base = c.baseArgs(H)
+    check('T5.1 基础参数 BatchMode/accept-new/ConnectTimeout', base.includes('-o') && base.join(' ').includes('BatchMode=yes') && base.join(' ').includes('StrictHostKeyChecking=accept-new') && base.join(' ').includes('ConnectTimeout=2'))
+    check('T5.2 22 端口不加 -p', !base.includes('-p'))
+    const mux = c.muxArgs(H)
+    check('T5.3 mux 参数含 Control 三件套', mux.join(' ').includes('ControlMaster=auto') && mux.join(' ').includes('ControlPath=/tmp/cm-test/h1.sock') && mux.join(' ').includes('ControlPersist=600'))
+    check('T5.4 target', c.target(H) === 'root@1.2.3.4')
+
+    const H2 = { ...H, port: 2222, jump: 'bastion', _jumpHost: { user: 'ops', host: '10.0.0.9', port: 2222 } }
+    check('T5.5 非 22 加 -p', c.muxArgs(H2).includes('-p') && c.muxArgs(H2).includes('2222'))
+    check('T5.6 jump 转 -J（_jumpHost 由 resolveJump 注入，单测直接预置）', c.muxArgs(H2).includes('-J') && c.muxArgs(H2).includes('ops@10.0.0.9:2222'))
+
+    const cw = new ConnectionManager(connOpts([], { platform: 'win32' }))
+    check('T5.7 win32 降级无 Control 参数', !cw.muxArgs(H).join(' ').includes('ControlMaster'))
+    check('T5.8 win32 降级标志', cw.degraded === true)
+  }
+
+  // ensureMaster：check 失败 → 清 socket → spawn master → poll check 成功
+  {
+    const log = []
+    let checkCalls = 0
+    const opts = connOpts(log, {
+      spawnFn: (cmd, args, o) => {
+        const child = fakeChild(7000 + log.length)
+        log.push({ cmd, args, opts: o, child, isCheck: args.includes('-O') && args.includes('check') })
+        if (args.includes('-O') && args.includes('check')) {
+          checkCalls += 1
+          setTimeout(() => child.emitClose(checkCalls >= 2 ? 0 : 255), 10) // 第一次无 master，建后成功
+        } else if (args.includes('-N')) {
+          // master 进程：保持存活（不发 exit）
+        }
+        return child
+      },
+    })
+    const c = new ConnectionManager(opts)
+    const r = await c.ensureMaster(H)
+    check('T5.9 建连成功', r.ok === true)
+    const masterEntry = log.find(e => e.args.includes('-N'))
+    check('T5.10 spawn 了 -N master', !!masterEntry)
+    check('T5.11 master 带 ServerAlive', masterEntry.args.join(' ').includes('ServerAliveInterval=30'))
+    check('T5.12 master detached', masterEntry.opts.detached === true)
+    // 再 ensure：check 直接过，不重复 spawn master
+    const before = log.length
+    const r2 = await c.ensureMaster(H)
+    check('T5.13 复用不重建', r2.ok === true && log.filter(e => e.args.includes('-N')).length === 1)
+    check('T5.14 stats 记录', c.view()[0].id === 'h1' && c.view()[0].commands === 0)
+  }
+
+  // master 建连失败（超时窗口内 check 一直 255）
+  {
+    const log = []
+    const opts = connOpts(log, {
+      spawnFn: (cmd, args, o) => {
+        const child = fakeChild(7100 + log.length)
+        log.push({ cmd, args, opts: o, child })
+        if (args.includes('check')) setTimeout(() => child.emitClose(255), 5)
+        if (args.includes('-N')) setTimeout(() => { child.writeErr('Permission denied (publickey)'); child.emitExit(255) }, 30) // master 秒死（如 auth 失败）
+        return child
+      },
+    })
+    const c = new ConnectionManager(opts)
+    const r = await c.ensureMaster(H)
+    check('T5.15 建连失败上报', r.ok === false && typeof r.error === 'string' && r.error.includes('Permission denied'))
+  }
+
+  // 拆除：-O exit
+  {
+    const log = []
+    const opts = connOpts(log, {
+      spawnFn: (cmd, args, o) => {
+        const child = fakeChild(7200 + log.length)
+        log.push({ cmd, args, opts: o, child })
+        setTimeout(() => child.emitClose(0), 5)
+        return child
+      },
+    })
+    const c = new ConnectionManager(opts)
+    await c.ensureMaster(H)
+    await c.teardown(H)
+    check('T5.16 teardown 发 -O exit', log.some(e => e.args.includes('exit') && e.cmd === 'ssh'))
+  }
+
+  // 回归：状态卫生
+  {
+    // I1：jump 引用被删后 -J 不残留
+    const c1 = new ConnectionManager(connOpts([]))
+    const H3 = { ...H, jump: 'bastion', _jumpHost: { user: 'ops', host: '10.0.0.9', port: 2222 } }
+    c1.resolveJump(H3, { list: () => [] })
+    check('T5.17 jump 失配清除 _jumpHost', !c1.muxArgs(H3).includes('-J'), c1.muxArgs(H3).join(' '))
+    const H4 = { ...H, jump: 'bastion' }
+    c1.resolveJump(H4, { list: () => [{ id: 'bastion', user: 'ops', host: '10.0.0.9', port: 2222 }] })
+    check('T5.17b jump 命中注入 _jumpHost', c1.muxArgs(H4).includes('-J') && c1.muxArgs(H4).includes('ops@10.0.0.9:2222'))
+  }
+  {
+    // I2：复用成功清 lastError
+    const log2 = []
+    let okNow = false
+    const c2 = new ConnectionManager(connOpts(log2, {
+      spawnFn: (cmd, args, o) => {
+        const child = fakeChild(7700 + log2.length)
+        log2.push({ cmd, args, opts: o, child })
+        if (args.includes('check')) setTimeout(() => child.emitClose(okNow ? 0 : 255), 5)
+        else if (args.includes('-N')) { /* master 存活 */ }
+        else setTimeout(() => child.emitClose(0), 5)
+        return child
+      },
+    }))
+    const rFail = await c2.ensureMaster(H)
+    const st = c2.stat(H.id)
+    okNow = true
+    // 模拟 master 后来建好：直接构造复用成功路径
+    st.master = 'up'
+    const rOk = await c2.ensureMaster(H)
+    check('T5.18 复用成功清 lastError', rFail.ok === false && rOk.ok === true && c2.stat(H.id).lastError === null, JSON.stringify(c2.stat(H.id)))
+  }
+  {
+    // N1：teardown 后迟到 exit 不写 lastError
+    // （先走真实建连拿挂好 exit 处理器的 master：check#1 255 → spawn -N → check#2 0 → up；再 teardown → 迟到 exit）
+    const log3 = []
+    let checkCalls = 0
+    let masterChild = null
+    const c3 = new ConnectionManager(connOpts(log3, {
+      spawnFn: (cmd, args, o) => {
+        const child = fakeChild(7800 + log3.length)
+        log3.push({ cmd, args, opts: o, child })
+        if (args.includes('check')) { checkCalls += 1; setTimeout(() => child.emitClose(checkCalls >= 2 ? 0 : 255), 5) }
+        else if (args.includes('-N')) masterChild = child
+        else setTimeout(() => child.emitClose(0), 5)
+        return child
+      },
+    }))
+    const rUp = await c3.ensureMaster(H)
+    check('T5.19 前置：master 已 up 且捕获到 master 子进程', rUp.ok === true && masterChild !== null, JSON.stringify(rUp))
+    await c3.teardown(H)
+    masterChild.stderr.emit('data', Buffer.from('late exit noise', 'utf8'))
+    masterChild.emitExit(255)
+    check('T5.19 teardown 后迟到 exit 不写 lastError', c3.stat(H.id).lastError === null && c3.stat(H.id).master === 'down', JSON.stringify(c3.stat(H.id)))
+  }
+}
+
+// ================= T6 fsops read/write =================
+import { FsOps, FsOpsError } from '../lib/fsops.js'
+
+async function t6() {
+  console.log('== T6 fsops read/write ==')
+  const H = { id: 'h1', host: '1.2.3.4', user: 'root', port: 22, identityFile: '/k', defaultCwd: '' }
+
+  // read：复合命令 + 行号 + 嗅探
+  {
+    const calls = []
+    const fx = new FsOps({
+      runner: {
+        run: async (h, command, o) => {
+          calls.push({ kind: 'run', command, o })
+          return { exitCode: 0, stdout: '__SR__ abcdef0123 8000 8000\nline1\nline2\n', stderr: '', timedOut: false }
+        },
+        runWithStdin: async (h, script, o) => {
+          calls.push({ kind: 'stdin', script, o })
+          return { exitCode: 0, stdout: 'newhash', stderr: '', timedOut: false }
+        },
+      },
+    })
+    const r = await fx.read(H, '/etc/app.conf', { offset: 1, limit: 2 })
+    check('T6.1 read 解析 META/行号', r.lines === 2 && r.content === '1\tline1\n2\tline2\n', JSON.stringify(r))
+    check('T6.2 read sha 透传', r.sha256 === 'abcdef0123')
+    check('T6.3 read 文本判定（8000=8000）', r.binary === false)
+    check('T6.4 复合命令含 sed 窗口', calls[0].command.includes("sed -n '1,2p'") && calls[0].command.includes('sha256sum'))
+    check('T6.5 路径单引号包裹', calls[0].command.includes("'/etc/app.conf'"))
+
+    // offset 窗口（fixture 模拟 sed -n '2,3p' 只回窗口行）
+    const fx2 = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: '__SR__ h1 100 100\nbeta\ngamma\n', stderr: '', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: 'x', stderr: '', timedOut: false }),
+      },
+    })
+    const r2 = await fx2.read(H, '/a.txt', { offset: 2, limit: 2 })
+    check('T6.6 offset 窗口行号', r2.content === '2\tbeta\n3\tgamma\n', JSON.stringify(r2))
+    check('T6.7 文件非二进制', r2.binary === false)
+
+    // 二进制拒绝（a≠b → throw binary-rejected）
+    const fxB = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: '__SR__ abcdef0123 8192 8000\n\x00\x01bin\n', stderr: '', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let binErr = null
+    try { await fxB.read(H, '/b.bin', {}) } catch (e) { binErr = e }
+    check('T6.3b 二进制拒绝读取', binErr && binErr.kind === 'binary-rejected', String(binErr))
+
+    // not-found 分类
+    const fx3 = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 1, stdout: '', stderr: 'cat: /nope: No such file or directory', errorKind: 'not-found', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let err = null
+    try { await fx3.read(H, '/nope', {}) } catch (e) { err = e }
+    check('T6.8 not-found 抛错', err && err.kind === 'not-found', String(err))
+  }
+
+  // write：stdin → tmp → mv 原子替换 + mkdirs
+  {
+    const SHA = 'deadbeef'.repeat(8) // 64 位 hex，过 write 的 sha 校验
+    const calls = []
+    const fx = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+        runWithStdin: async (h, script, o) => { calls.push({ script, stdin: o.stdin }); return { exitCode: 0, stdout: SHA, stderr: '', timedOut: false } },
+      },
+    })
+    const r = await fx.write(H, '/srv/app/conf.yml', 'key: 1\n', { mkdirs: true })
+    check('T6.9 write 返回新 sha', r.sha256 === SHA)
+    check('T6.10 write 脚本 mkdir+tmp+mv', calls[0].script.includes('mkdir -p') && calls[0].script.includes('__tmp__') && calls[0].script.includes('mv '), calls[0].script)
+    check('T6.11 write stdin 是内容', calls[0].stdin === 'key: 1\n')
+    // 不带 mkdirs
+    calls.length = 0
+    await fx.write(H, '/srv/x', 'v', {})
+    check('T6.12 无 mkdirs 不建目录', !calls[0].script.includes('mkdir -p'))
+  }
+
+  // 回归：截断/NaN/相对路径/退化 meta
+  {
+    const fxT = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: 'just-content-no-meta', stderr: '', timedOut: false, stdoutTruncated: true }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let e1 = null
+    try { await fxT.read(H, '/big.log', {}) } catch (e) { e1 = e }
+    check('T6.13 截断报 result-truncated', e1 && e1.kind === 'result-truncated', String(e1))
+    let e2 = null
+    try { await fxT.read(H, '/a', { offset: 'x' }) } catch (e) { e2 = e }
+    check('T6.14 非数字 offset 报 bad-args', e2 && e2.kind === 'bad-args', String(e2))
+    let e3 = null
+    try { await fxT.read(H, 'relative.txt', {}) } catch (e) { e3 = e }
+    check('T6.15 相对路径报 bad-args', e3 && e3.kind === 'bad-args', String(e3))
+    const fxW = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: '__SR__   ' + 'a'.repeat(64) + '     100\nhello\n', stderr: '', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: 'x', stderr: '', timedOut: false }),
+      },
+    })
+    const rw = await fxW.readWhole(H, '/a.txt')
+    check('T6.16 BSD 前导空格 meta 容忍', rw.sha256 === 'a'.repeat(64) && rw.content === 'hello\n', JSON.stringify(rw))
+    const fxW2 = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: '__SR__ short 100\nhello\n', stderr: '', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let e4 = null
+    try { await fxW2.readWhole(H, '/a.txt') } catch (e) { e4 = e }
+    check('T6.17 readWhole sha 强校验', e4 && e4.kind === 'parse-error', String(e4))
+  }
+}
+
+// ================= T7 fsops edit =================
+function editHarness(wholeStdout, stdinResult) {
+  const calls = []
+  const fx = new FsOps({
+    runner: {
+      run: async (h, command, o) => { calls.push({ kind: 'run', command }); return { exitCode: 0, stdout: wholeStdout, stderr: '', timedOut: false } },
+      runWithStdin: async (h, script, o) => { calls.push({ kind: 'stdin', script, stdin: o.stdin }); return stdinResult },
+    },
+  })
+  return { fx, calls }
+}
+
+async function t7() {
+  console.log('== T7 fsops edit ==')
+  const H = { id: 'h1', host: '1.2.3.4', user: 'root', port: 22, identityFile: '/k', defaultCwd: '' }
+  const SHA_A = 'a'.repeat(64)
+  const SHA_B = 'b'.repeat(64)
+  const whole = '__SR__ ' + SHA_A + ' 100\nhello world\nfoo = 1\n'
+
+  // 正常编辑
+  {
+    const { fx, calls } = editHarness(whole, { exitCode: 0, stdout: SHA_B, stderr: '', timedOut: false })
+    const r = await fx.edit(H, '/a.conf', 'foo = 1', 'foo = 2', {})
+    check('T7.1 edit 成功返回替换数与 sha', r.replaced === 1 && r.sha256 === SHA_B)
+    check('T7.2 关键段含期望 sha 校验', calls[1].script.includes(SHA_A) && calls[1].script.includes('sha256sum'), calls[1].script)
+    check('T7.3 关键段 stale 退出码 75', calls[1].script.includes('exit 75'))
+    check('T7.4 新内容走 stdin', calls[1].stdin === 'hello world\nfoo = 2\n', JSON.stringify(calls[1].stdin))
+
+    // oldString 不存在
+    let e1 = null
+    try { await fx.edit(H, '/a.conf', 'nope', 'x', {}) } catch (e) { e1 = e }
+    check('T7.5 未匹配报错', e1 && e1.kind === 'not-found', String(e1))
+
+    // 多处匹配未开 replaceAll
+    const whole2 = '__SR__ ' + SHA_A + ' 100\naa\naa\n'
+    const h2res = { exitCode: 0, stdout: SHA_B, stderr: '', timedOut: false }
+    const fx2 = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 0, stdout: whole2, stderr: '', timedOut: false }),
+        runWithStdin: async (h, s, o) => { calls.push({ kind: 'stdin2', script: s, stdin: o.stdin }); return h2res },
+      },
+    })
+    let e2 = null
+    try { await fx2.edit(H, '/b', 'aa', 'bb', {}) } catch (e) { e2 = e }
+    check('T7.6 非唯一报错', e2 && e2.kind === 'not-unique', String(e2))
+
+    // replaceAll
+    const r3 = await fx2.edit(H, '/b', 'aa', 'bb', { replaceAll: true })
+    check('T7.7 replaceAll 全替换', r3.replaced === 2 && calls.some(c => c.stdin === 'bb\nbb\n'))
+  }
+
+  // stale：远端文件在读取后被改 → exit 75 → stale-edit
+  {
+    const { fx } = editHarness(whole, { exitCode: 75, stdout: '', stderr: '', timedOut: false })
+    let e = null
+    try { await fx.edit(H, '/a.conf', 'foo = 1', 'foo = 2', {}) } catch (err) { e = err }
+    check('T7.8 exit 75 → stale-edit', e && e.kind === 'stale-edit', String(e))
+  }
+
+  // 集成回归：关键段脚本在真实 /bin/sh 下执行（不碰网络）
+  {
+    const { spawn: shSpawn } = await import('node:child_process')
+    const { createHash } = await import('node:crypto')
+    const shaOf = (s) => createHash('sha256').update(s).digest('hex')
+    const runSh = (script, stdin) => new Promise((resolve) => {
+      const c = shSpawn('/bin/sh', ['-c', script], { stdio: ['pipe', 'pipe', 'pipe'] })
+      let out = ''
+      let errS = ''
+      c.stdout.on('data', d => { out += d })
+      c.stderr.on('data', d => { errS += d })
+      c.stdin.write(stdin)
+      c.stdin.end()
+      c.on('close', (code) => resolve({ code, out, errS }))
+    })
+    // 与 lib/fsops.js edit 关键段同构（生产侧 readlink/mv 守卫/stale 语义在此真机验证）
+    const mkScript = (filePath, sha) => 'f=$(readlink -f -- ' + JSON.stringify(filePath) + ') || exit 76; '
+      + 't="$f.__tmp__t79"; cat > "$t" || { rm -f "$t"; exit 70; }; '
+      + 'if [ "$(sha256sum "$f" | cut -d\' \' -f1)" = \'' + sha + '\' ]; then mv "$t" "$f" || { rm -f "$t"; exit 70; }; else rm -f "$t"; exit 75; fi; '
+      + 'sha256sum "$f" | cut -d\' \' -f1'
+
+    // 成功路径
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 't7-int-'))
+    const f1 = path.join(tmpDir, 'a.conf')
+    fs.writeFileSync(f1, 'hello\nfoo = 1\n')
+    const r1s = await runSh(mkScript(f1, shaOf('hello\nfoo = 1\n')), 'hello\nfoo = 2\n')
+    check('T7.9 关键段真机成功（exit 0 + 新 sha）', r1s.code === 0 && r1s.out.trim() === shaOf('hello\nfoo = 2\n'), JSON.stringify(r1s))
+    // stale 路径：sha 不符 → exit 75，原文保留
+    fs.writeFileSync(f1, 'hello\nfoo = 1\n')
+    const r2s = await runSh(mkScript(f1, 'deadbeef'), 'hello\nfoo = 9\n')
+    check('T7.10 关键段真机 stale（exit 75 + 原文保留）', r2s.code === 75 && fs.readFileSync(f1, 'utf8') === 'hello\nfoo = 1\n', JSON.stringify(r2s))
+    // 单替换 $ 字面量（fake runner，只验 node 侧替换语义）
+    const fxD = editHarness('__SR__ ' + SHA_A + ' 9\nvXv\n', { exitCode: 0, stdout: SHA_B, stderr: '', timedOut: false })
+    await fxD.fx.edit(H, '/d.txt', 'X', '100$&', {})
+    check('T7.11 单替换 $& 字面量不展开', fxD.calls.some(c => c.kind === 'stdin' && c.stdin === 'v100$&v\n'), JSON.stringify(fxD.calls.filter(c => c.kind === 'stdin').map(c => c.stdin)))
+    // symlink 实体化：编辑 link 实际写 target，link 关系保持
+    const realF = path.join(tmpDir, 'real.conf')
+    const linkF = path.join(tmpDir, 'link.conf')
+    fs.writeFileSync(realF, 'v1\n')
+    fs.symlinkSync(realF, linkF)
+    const r3s = await runSh(mkScript(linkF, shaOf('v1\n')), 'v2\n')
+    check('T7.12 symlink 编辑实体（link 保持 + 目标更新）', r3s.code === 0 && fs.readFileSync(realF, 'utf8') === 'v2\n' && fs.realpathSync(linkF) === fs.realpathSync(realF), JSON.stringify(r3s))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+}
+
+// ================= T8 fsops glob/grep =================
+async function t8() {
+  console.log('== T8 fsops glob/grep ==')
+  const H = { id: 'h1', host: '1.2.3.4', user: 'root', port: 22, identityFile: '/k', defaultCwd: '' }
+  const calls = []
+  const mk = (stdout, extra = {}) => new FsOps({
+    runner: {
+      run: async (h, command) => { calls.push(command); return { exitCode: 0, stdout, stderr: '', timedOut: false, ...extra } },
+      runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    },
+  })
+
+  calls.length = 0
+  const g = await mk('/a.js\n/b.js\n/c.js\n').glob(H, '*.js', { path: '/srv', maxDepth: 3 })
+  check('T8.1 glob 返回文件数组', g.files.length === 3 && g.files[0] === '/a.js')
+  check('T8.2 glob 命令 find/-maxdepth/-name', calls[0].includes('find') && calls[0].includes('-maxdepth 3') && calls[0].includes("'*.js'") && calls[0].includes("'/srv'"))
+  check('T8.3 glob 上限截断标记', (await mk(Array.from({ length: 205 }, (_, i) => '/f' + i).join('\n') + '\n').glob(H, '*', { path: '/', maxDepth: 1 })).truncated === true)
+
+  calls.length = 0
+  const gr = await mk('/a.js:3:foo()\n/a.js:9:bar\n').grep(H, 'foo\\(', { path: '/srv', include: '*.js' })
+  check('T8.4 grep 返回行数组', gr.matches.length === 2)
+  check('T8.5 grep 命令 -rnE/-I/--include/--exclude-dir', calls[0].includes('grep') && calls[0].includes('-rnE') && calls[0].includes('-I') && calls[0].includes("--include='*.js'") && calls[0].includes('--exclude-dir=.git'))
+  calls.length = 0
+  await mk('x\n').grep(H, 'y', { path: '/srv', ignoreCase: true })
+  check('T8.6 ignoreCase 加 -i', calls[0].includes('-i'))
+  check('T8.7 grep 上限 250', (await mk(Array.from({ length: 255 }, () => 'm').join('\n') + '\n').grep(H, 'm', { path: '/' })).truncated === true)
+  // 截断传播：远端 stdout 截断 → truncated 标志
+  const gt = await mk('/a\n/b\n', { stdoutTruncated: true }).glob(H, '*', { path: '/' })
+  check('T8.8 stdout 截断传播 truncated', gt.truncated === true)
+
+  // 错误分支回归
+  {
+    const fxErr = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 2, stdout: '', stderr: 'find: /nope: No such file or directory', timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let eg = null
+    try { await fxErr.glob(H, '*', { path: '/nope' }) } catch (e) { eg = e }
+    check('T8.9 glob 出错抛 glob-failed', eg && eg.kind === 'glob-failed' && String(eg.message).includes('No such file'), String(eg))
+    const fxErr2 = new FsOps({
+      runner: {
+        run: async () => ({ exitCode: 2, stdout: '', stderr: "grep: Unmatched ( or \\(", timedOut: false }),
+        runWithStdin: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      },
+    })
+    let er = null
+    try { await fxErr2.grep(H, '(', {}) } catch (e) { er = e }
+    check('T8.10 grep 非法正则抛 grep-failed', er && er.kind === 'grep-failed', String(er))
+    let ed = null
+    try { await fxErr.glob(H, '*', { path: '/', maxDepth: 'abc' }) } catch (e) { ed = e }
+    check('T8.11 maxDepth 非数字 bad-args', ed && ed.kind === 'bad-args', String(ed))
+  }
+}
+
+// ================= T9 transfer =================
+import { Transfer } from '../lib/transfer.js'
+
+async function t9() {
+  console.log('== T9 transfer ==')
+  const H = { id: 'h1', host: '1.2.3.4', user: 'root', port: 2222, identityFile: '/k', defaultCwd: '' }
+  const conn = {
+    scpArgs: () => ['-i', '/k', '-o', 'ControlPath=/tmp/x.sock'],
+    muxArgs: () => ['-i', '/k', '-o', 'ControlPath=/tmp/x.sock', '-p', '2222'],
+    target: () => 'root@1.2.3.4',
+  }
+  const runCalls = []
+  const runner = { run: async (h, c) => { runCalls.push(c); return { exitCode: 0, stdout: '', stderr: '', timedOut: false } } }
+
+  // 单文件推：scp -P 2222
+  {
+    const log = []
+    const tr = new Transfer({ conn, runner, spawnFn: recordingSpawn(log), sleepMs: 1 })
+    const p = tr.push(H, '/local/a.js', '/srv/a.js', {})
+    setTimeout(() => log[0].child.emitClose(0), 5)
+    const r = await p
+    check('T9.1 scp 推成功', r.exitCode === 0)
+    check('T9.2 scp 用 -P 大写端口', log[0].cmd === 'scp' && log[0].args.includes('-P') && log[0].args.includes('2222'))
+    check('T9.3 scp 目标 user@host:remote', log[0].args.includes('root@1.2.3.4:/srv/a.js'))
+    check('T9.4 scp 复用 ControlPath', log[0].args.includes('ControlPath=/tmp/x.sock'))
+  }
+
+  // 目录推：mkdir -p + tar|ssh 管道
+  {
+    const log = []
+    const tr = new Transfer({ conn, runner, spawnFn: recordingSpawn(log), sleepMs: 1 })
+    const p = tr.push(H, '/local/dir', '/srv/dir', { recursive: true })
+    setTimeout(() => { log.find(e => e.cmd === 'tar').child.emitClose(0); log.find(e => e.cmd === 'ssh').child.emitClose(0) }, 10)
+    const r = await p
+    check('T9.5 目录推成功', r.exitCode === 0)
+    check('T9.6 先 mkdir -p 远端目录', runCalls.some(c => c.includes('mkdir -p') && c.includes("'/srv/dir'")))
+    const tar = log.find(e => e.cmd === 'tar')
+    const ssh = log.find(e => e.cmd === 'ssh' && e.args.some(a => String(a).includes('tar -C')))
+    check('T9.7 本地 tar argv 精确', tar && JSON.stringify(tar.args) === JSON.stringify(['-C', '/local/dir', '-cf', '-', '.']), JSON.stringify(tar && tar.args))
+    check('T9.8 远端 tar -C 解包', ssh && ssh.args.join(' ').includes("tar -C '/srv/dir' -xf -"))
+  }
+
+  // 单文件拉
+  {
+    const log = []
+    const tr = new Transfer({ conn, runner, spawnFn: recordingSpawn(log), sleepMs: 1 })
+    const p = tr.pull(H, '/srv/a.js', '/local/a.js', {})
+    setTimeout(() => log[0].child.emitClose(0), 5)
+    const r = await p
+    check('T9.9 scp 拉成功', r.exitCode === 0 && log[0].args.includes('root@1.2.3.4:/srv/a.js') && log[0].args.includes('/local/a.js'))
+  }
+
+  // 超时双杀
+  {
+    const log = []
+    const tr = new Transfer({ conn, runner, spawnFn: recordingSpawn(log), sleepMs: 1 })
+    const r = await tr.push(H, '/local/dir', '/srv/dir', { recursive: true, timeoutMs: 80 })
+    check('T9.10 超时标记且双杀', r.timedOut === true && log.every(e => e.child.killed), JSON.stringify(r))
+  }
+
+  // 本地集成：真实 tar → sh(tar) 管道目录推（不碰网络）
+  {
+    const { spawn: realSpawn } = await import('node:child_process')
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 't9-int-'))
+    const srcDir = path.join(tmpDir, 'src')
+    const dstDir = path.join(tmpDir, 'dst')
+    fs.mkdirSync(srcDir)
+    fs.writeFileSync(path.join(srcDir, 'a.txt'), 'payload-A')
+    fs.mkdirSync(path.join(srcDir, 'sub'))
+    fs.writeFileSync(path.join(srcDir, 'sub', 'b.txt'), 'payload-B')
+    const trInt = new Transfer({
+      conn: { scpArgs: () => [], muxArgs: () => [], target: () => 'localhost' },
+      // runner shim 真实执行远端脚本（mkdir -p）：dstDir 由生产路径创建，整条链路保真
+      runner: {
+        run: async (h, command) => await new Promise((resolve) => {
+          const c = realSpawn('sh', ['-c', command], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+          let err = ''
+          if (c.stderr) c.stderr.on('data', d => { err += d.toString('utf8') })
+          c.on('close', (code) => resolve({ exitCode: code, stdout: '', stderr: err, timedOut: false }))
+          c.on('error', () => resolve({ exitCode: -1, stdout: '', stderr: 'runner spawn 失败', timedOut: false }))
+        }),
+      },
+      spawnFn: (cmd, args, opts) => {
+        if (cmd === 'tar') return realSpawn('tar', args, opts)
+        if (cmd === 'ssh') return realSpawn('sh', ['-c', 'exec ' + args[args.length - 1]], opts)
+        if (cmd === 'scp') return realSpawn('false', [], opts)
+        return realSpawn(cmd, args, opts)
+      },
+      sleepMs: 1,
+    })
+    const rInt = await trInt.push({ id: 'h1', host: 'x', user: 'u', port: 22, identityFile: '/k', defaultCwd: '' }, srcDir, dstDir, { recursive: true, timeoutMs: 15000 })
+    const okFiles = fs.existsSync(path.join(dstDir, 'a.txt')) && fs.existsSync(path.join(dstDir, 'sub', 'b.txt'))
+      && fs.readFileSync(path.join(dstDir, 'a.txt'), 'utf8') === 'payload-A'
+      && fs.readFileSync(path.join(dstDir, 'sub', 'b.txt'), 'utf8') === 'payload-B'
+    check('T9.11 本地 tar→sh(tar) 目录推集成', rInt.exitCode === 0 && okFiles, JSON.stringify(rInt))
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+
+  // H1 回归：tar 管道 ssh 用 muxArgs（含 -p）
+  {
+    const log = []
+    const connP = {
+      scpArgs: () => ['-i', '/k'],
+      muxArgs: (h) => ['-i', '/k', '-p', String(h.port)],
+      target: () => 'root@1.2.3.4',
+    }
+    const runnerP = { run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }) }
+    const trP = new Transfer({ conn: connP, runner: runnerP, spawnFn: recordingSpawn(log), sleepMs: 1 })
+    const pPush = trP.push(H, '/local/dir', '/srv/dir', { recursive: true })
+    setTimeout(() => { log.find(e => e.cmd === 'tar').child.emitClose(0); log.filter(e => e.cmd === 'ssh').forEach(e => e.child.emitClose(0)) }, 10)
+    const rPush = await pPush
+    const sshPush = log.find(e => e.cmd === 'ssh')
+    check('T9.12 目录推 ssh 含 -p 端口', rPush.exitCode === 0 && sshPush.args.includes('-p') && sshPush.args.includes('2222'), JSON.stringify(sshPush && sshPush.args))
+    const log2 = []
+    const trP2 = new Transfer({ conn: connP, runner: runnerP, spawnFn: recordingSpawn(log2), sleepMs: 1 })
+    // pullDir 会对本地目录 mkdirSync——用 tmpdir 隔离，避免污染工作区
+    const pullLocal = path.join(os.tmpdir(), 't9-pull-' + Date.now())
+    const pPull = trP2.pull(H, '/srv/dir', pullLocal, { recursive: true })
+    setTimeout(() => { log2.find(e => e.cmd === 'tar').child.emitClose(0); log2.filter(e => e.cmd === 'ssh').forEach(e => e.child.emitClose(0)) }, 10)
+    const rPull = await pPull
+    const sshPull = log2.find(e => e.cmd === 'ssh')
+    check('T9.13 目录拉 ssh 含 -p 端口', rPull.exitCode === 0 && sshPull.args.includes('-p') && sshPull.args.includes('2222'), JSON.stringify(sshPull && sshPull.args))
+    fs.rmSync(pullLocal, { recursive: true, force: true })
+  }
+}
+
+// ================= T10 index.js 工具装配 =================
+import { apply } from '../lib/index.js'
+
+function fakeCtx() {
+  const registeredTools = []
+  const sections = []
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    effect(fn) { const d = fn(); disposers.push(typeof d === 'function' ? d : () => {}); return disposers[disposers.length - 1] },
+    tools: { register(def) { registeredTools.push(def) } },
+    systemPrompt: { section(s) { sections.push(s) } },
+    inject(names, fn) { ctx._injects.push([names, fn]) },
+    _injects: [],
+    _registeredTools: registeredTools,
+    _sections: sections,
+    _disposers: disposers,
+  }
+  return ctx
+}
+
+async function t10() {
+  console.log('== T10 index.js 工具装配 ==')
+  const ctx = fakeCtx()
+  apply(ctx, { hosts: [{ id: 't1', host: '1.2.3.4', identityFile: '/k' }], commandTimeoutMs: 1000, hostsFile: path.join(os.tmpdir(), 'ssh-remote-t10-' + Date.now() + '.json') })
+  const names = ctx._registeredTools.map(t => t.name)
+  const want = ['ssh_hosts', 'ssh_status', 'ssh_run', 'ssh_read', 'ssh_write', 'ssh_edit', 'ssh_glob', 'ssh_grep', 'ssh_push', 'ssh_pull']
+  check('T10.1 十个工具注册', want.every(n => names.includes(n)), names.join(','))
+  check('T10.2 系统提示注册', ctx._sections.length === 1 && ctx._sections[0].name === 'ssh-remote' && ctx._sections[0].text.includes('ssh_hosts'))
+  check('T10.3 生命周期 effect', ctx._disposers.length === 1)
+
+  const hostsTool = ctx._registeredTools.find(t => t.name === 'ssh_hosts')
+  const hv = await hostsTool.execute({})
+  check('T10.4 ssh_hosts 返回主机', hv.hosts.length === 1 && hv.hosts[0].id === 't1')
+
+  const runTool = ctx._registeredTools.find(t => t.name === 'ssh_run')
+  let e1 = null
+  try { await runTool.execute({ hostId: 'nope', command: 'x' }) } catch (e) { e1 = e }
+  check('T10.5 未知 hostId 报错', e1 && String(e1.message).includes('t1'))
+  let e2 = null
+  try { await runTool.execute({ command: '' }) } catch (e) { e2 = e }
+  check('T10.6 空 command 报错', e2 !== null)
+
+  // 门卫通道：gate 失败 kind=unreachable / FsOpsError kind 透传
+  {
+    const ctx2 = fakeCtx()
+    const inst = apply(ctx2, { hosts: [{ id: 't1', host: '1.2.3.4', identityFile: '/k' }], hostsFile: path.join(os.tmpdir(), 'ssh-remote-t10b-' + Date.now() + '.json') })
+    const runTool2 = ctx2._registeredTools.find(t => t.name === 'ssh_run')
+    inst.conn.beforeOp = async () => ({ ok: false, error: 'ssh: connect to host 1.2.3.4 port 22: Connection timed out' })
+    const rg = await runTool2.execute({ command: 'x' })
+    check('T10.7 gate 失败 kind=unreachable', rg.ok === false && rg.error.kind === 'unreachable' && rg.error.message.includes('timed out'), JSON.stringify(rg))
+    const readTool2 = ctx2._registeredTools.find(t => t.name === 'ssh_read')
+    inst.conn.beforeOp = async () => ({ ok: true, degraded: false })
+    inst.fsops.read = async () => { const e = new FsOpsError('文件在读取后已被修改', 'stale-edit'); throw e }
+    const rr = await readTool2.execute({ path: '/a' })
+    check('T10.8 FsOpsError kind 透传', rr.ok === false && rr.error.kind === 'stale-edit', JSON.stringify(rr))
+    ctx2._disposers.forEach(d => d())
+  }
+  // 清理（防 watcher 吊住进程）
+  ctx._disposers.forEach(d => d())
+}
+
+// ================= T11 HTTP API =================
+async function t11() {
+  console.log('== T11 HTTP API ==')
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t11-'))
+  const hostsFile = path.join(tmpDir, 'hosts.json')
+
+  const ctx = fakeCtx()
+  apply(ctx, { hosts: [], hostsFile })
+  const routes = []
+  ctx._injects.forEach(([names, fn]) => {
+    if (names.includes('webServer')) {
+      fn({
+        effect(cb) { const d = cb(); return typeof d === 'function' ? d : () => {} },
+        webServer: { register(entry) { routes.push(entry) } },
+      })
+    }
+  })
+  check('T11.1 路由注册', routes.length === 1 && routes[0].path === '/ssh-remote/api', JSON.stringify(routes.map(r => r.path)))
+  const handler = routes[0].handler
+
+  const mkRes = () => { const r = {}; r.writeHead = (s) => { r.status = s }; r.end = (b) => { r.body = b }; return r }
+
+  // 回环守卫
+  const res403 = mkRes()
+  handler({ method: 'GET', url: '/ssh-remote/api/status', headers: { host: 'evil.com' } }, res403)
+  check('T11.2 非回环 403', res403.status === 403)
+  const res403b = mkRes()
+  handler({ method: 'GET', url: '/ssh-remote/api/status', headers: { host: '127.0x0.1:8080' } }, res403b)
+  check('T11.2b 未转义通配形态 403', res403b.status === 403, String(res403b.status))
+
+  // hosts CRUD
+  const resC = mkRes()
+  handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resC, JSON.stringify({ id: 'd1', name: '动态机', host: '1.1.1.1', identityFile: '/k' }))
+  await sleep(30)
+  check('T11.3 新增动态主机 200', resC.status === 200 && JSON.parse(resC.body).ok === true, resC.body)
+  check('T11.4 落盘 hostsFile', readHostsFile(hostsFile).some(h => h.id === 'd1'))
+
+  // bulk 替换
+  const resB = mkRes()
+  handler({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: 'localhost' } }, resB, JSON.stringify({ hosts: [{ id: 'd2', host: '2.2.2.2', identityFile: '/k' }] }))
+  await sleep(30)
+  check('T11.5 bulk 替换动态集', readHostsFile(hostsFile).length === 1 && readHostsFile(hostsFile)[0].id === 'd2')
+
+  // import 预览 + 提交
+  const resI = mkRes()
+  handler({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n' }))
+  await sleep(30)
+  const pv = JSON.parse(resI.body)
+  check('T11.6 import 预览不落盘', pv.ok === true && pv.value.preview.hosts.length === 1 && readHostsFile(hostsFile).length === 1, resI.body)
+  const resI2 = mkRes()
+  handler({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI2, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n', commit: true }))
+  await sleep(30)
+  check('T11.7 import 提交落盘', readHostsFile(hostsFile).some(h => h.id === 'web'))
+
+  // DELETE
+  const resD = mkRes()
+  handler({ method: 'DELETE', url: '/ssh-remote/api/hosts/web', headers: { host: '127.0.0.1:1' } }, resD)
+  await sleep(30)
+  check('T11.8 删除动态主机', !readHostsFile(hostsFile).some(h => h.id === 'web'))
+
+  // status 视图
+  const resS = mkRes()
+  handler({ method: 'GET', url: '/ssh-remote/api/status', headers: { host: '127.0.0.1:1' } }, resS)
+  check('T11.9 status 200 带视图', resS.status === 200 && JSON.parse(resS.body).value.hosts !== undefined)
+
+  // 静态保护
+  const ctx2 = fakeCtx()
+  apply(ctx2, { hosts: [{ id: 'st', host: 'h', identityFile: 'k' }], hostsFile: path.join(tmpDir, 'h2.json') })
+  const routes2 = []
+  ctx2._injects.forEach(([names, fn]) => names.includes('webServer') && fn({ effect(cb) { cb(); return () => {} }, webServer: { register: (e) => routes2.push(e) } }))
+  const resDel2 = mkRes()
+  routes2[0].handler({ method: 'DELETE', url: '/ssh-remote/api/hosts/st', headers: { host: '127.0.0.1:1' } }, resDel2)
+  await sleep(30)
+  check('T11.10 静态主机删除被拒', resDel2.status === 409, String(resDel2.status))
+
+  // bulk 静态冲突 / POST 静态 id / 坏 JSON / 流式 body 生产路径
+  const resBC = mkRes()
+  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: '127.0.0.1:1' } }, resBC, JSON.stringify({ hosts: [{ id: 'st', host: 'h2', identityFile: 'k' }] }))
+  await sleep(30)
+  check('T11.11 bulk 静态冲突 409', resBC.status === 409, String(resBC.status))
+  const resPC = mkRes()
+  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resPC, JSON.stringify({ id: 'st', host: 'h2', identityFile: 'k' }))
+  await sleep(30)
+  check('T11.12 POST 静态 id 409', resPC.status === 409, String(resPC.status))
+  const resBJ = mkRes()
+  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resBJ, '{bad json')
+  await sleep(30)
+  check('T11.13 坏 JSON 400', resBJ.status === 400, String(resBJ.status))
+  // 流式 body 生产路径（req 事件流，不经第三参）
+  const mkStreamReq = (obj) => {
+    const chunks = Buffer.from(JSON.stringify(obj))
+    const listeners = {}
+    return {
+      method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' },
+      on(evt, cb) { listeners[evt] = cb; if (evt === 'end') { setTimeout(() => { listeners.data && listeners.data(chunks); listeners.end() }, 5) } return this },
+    }
+  }
+  const resStream = mkRes()
+  routes2[0].handler(mkStreamReq({ id: 'dyn-s', host: '4.4.4.4', identityFile: '/k' }), resStream)
+  await sleep(60)
+  check('T11.14 流式 body 生产路径 200', resStream.status === 200 && readHostsFile(path.join(tmpDir, 'h2.json')).some(h => h.id === 'dyn-s'), resStream.body)
+
+  ctx._disposers.forEach(d => d())
+  ctx2._disposers.forEach(d => d())
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+}
+
+const keepAlive = setInterval(() => {}, 1000)
+async function main() {
+  await t2()
+  await t3()
+  await t4()
+  await t5()
+  await t6()
+  await t7()
+  await t8()
+  await t9()
+  await t10()
+  await t11()
+  clearInterval(keepAlive)
+  summary()
+}
+main().catch(err => { console.error(err); process.exit(1) })

@@ -33,6 +33,44 @@ dsh plugin --profile web add git+https://github.com/<you>/dsh-kkutysllb-ssh-tunn
 
 动态主机：设置页「SSH 远程主机」区块添加/导入，写入 `~/.dsh/ssh-remote/hosts.json`，**热生效**。
 
+## QiLin（麒麟）双通道适配（v0.1.1 起）
+
+manifest 同时声明 `qilin` 与 `dsh` 两个通道的 `bundle.patch` / `client`：
+QiLin（dsh 0.1.6-alpha.2 合并后）的插件管理器只认原生键
+`qilin.bundle.patch`（缺失会报「没有声明组合包」），DSH 宿主仍读
+`dsh.*`；两通道指向同一份 `cordis.patch.yml` 与 client 交付物，
+行为完全一致。
+
+## 麒麟（QiLin）引擎安装
+
+```bash
+# npm registry（推荐：版本可被插件管理检测，用户手动更新）
+qilin plugin --profile qilin add dsh-ssh-remote
+
+# GitHub 直装 / install straight from GitHub
+qilin plugin --profile qilin add github:kkutysllb/dsh-kylin-ssh-tunnel
+```
+
+装完在 QiLin 设置 → 插件里可见、可启停；SSH 隧道/远程执行面板需要
+系统 ssh（ControlMaster；Windows 降级直连）。
+
+### 注意事项（QiLin）
+
+- **必须经 `qilin plugin add` 装进 profile**：包会落到 profile 私有的
+  `~/.qilin/profiles/<name>/node_modules`——裸包名原生解析的第一跳。
+  **不要**手工把包目录放进共享的 `~/.qilin/profiles/node_modules`：
+  dsh alpha.2 合并后的 runtime+enforce 解析把该目录划为安装保留区，
+  放那里的 bundle 层包激活时直接 `failed to import`。
+- **引擎版本**：运行需要带 dsh 兼容层的 QiLin 3.0.0+；插件**管理**
+  （设置页展示/启停）要求 3.0.2+（alpha.2 合并后只认
+  `qilin.bundle.patch` 原生键）。
+- **运行时解析**：dsh alpha.2 起依赖解析默认运行时模式（PR #4471），
+  插件运行期导入由 profile 安装图经进程内 generation 解析；引擎包按
+  框架契约声明于 peerDependencies，由宿主安装副本统一解析。
+- **数据根**（hosts.json、ControlMaster socket）按
+  `QILIN_HOME → DSH_HOME → ~/.dsh` 解析（QiLin 启动器会把 DSH_HOME
+  钉到麒麟家目录）。
+
 ## Agent 工具
 
 | 工具 | 作用 |

@@ -1,0 +1,5 @@
+node_modules
+*.log
+.DS_Store
+# 参考项目调研存档（自带 .git 的第三方检出，不入本仓版本控制）
+analysis/
