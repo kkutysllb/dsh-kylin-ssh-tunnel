@@ -505,47 +505,91 @@ window.__ModuleLoader__.load({
       err: { color: '#e5484d', fontSize: 11, marginTop: 6, wordBreak: 'break-all' },
       log: { fontSize: 10, fontFamily: 'ui-monospace, monospace', color: 'var(--dsw-alias-label-secondary,#aaa)', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2,#2a2a2a)', borderRadius: 6, padding: 8, marginTop: 8 },
       foot: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 },
+      crumbs: { display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 },
+      crumb: { font: 'inherit', fontSize: 11, padding: '2px 8px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1,#88888866)', background: 'transparent', color: 'var(--dsw-alias-label-secondary,#bbb)', cursor: 'pointer' },
     }
 
     function SshDirectoryFlow(props) {
       var open = props.open, busy = props.busy
       // 值域与 setter 必须来自**同一次** useState：拆成两次调用时 setter 属于
       // 另一个单元，状态永远不更新（只重渲染）——2026-09-26 实机踩到。
-      var pair = useState({ source: 'local', hosts: [], worlds: [], log: null, busy: false, error: null, detail: null })
+      var pair = useState({ source: 'local', hosts: [], worlds: [], log: null, busy: false, error: null, detail: null, remote: null, listing: null, loading: false })
       var st = pair[0]
       var set = pair[1]
       var render = function (patch) { set(function (s) { return Object.assign({}, s, patch) }) }
       useEffect(function () {
         if (!open) return
         render({ error: null })
+        fetch('/ssh-remote/api/world').then(function (r) { return r.json() }).then(function (res) {
+          var remote = !!(res && res.ok && res.value && res.value.remote)
+          render({ remote: remote })
+          // 远程世界：直接进应用内浏览（本世界就是那台机器），无来源可切换。
+          if (remote) loadListing(undefined)
+        }).catch(function () { render({ remote: false }) })
         fetch('/ssh-remote/api/hosts').then(function (r) { return r.json() }).then(function (res) {
           render({ hosts: res && res.ok && res.value ? res.value : [] })
         }).catch(function () { render({ error: '读取主机列表失败' }) })
-        var bridge = window.dshDesktop
-        if (bridge && bridge.remoteWorlds) {
-          bridge.remoteWorlds().then(function (w) { render({ worlds: w || [] }) }).catch(function () {})
-        }
+        fetch('/ssh-remote/api/worlds').then(function (r) { return r.json() }).then(function (res) {
+          render({ worlds: res && res.ok && res.value ? res.value : [] })
+        }).catch(function () {})
       }, [open])
       if (!open) return null
+      var browser = function () {
+        var l = st.listing
+        return h('div', null,
+          l ? h('div', { style: S2.crumbs }, l.crumbs.map(function (c, i) {
+            return h('button', { key: 'c' + i, type: 'button', style: S2.crumb, onClick: function () { loadListing(c.path) } }, c.name)
+          })) : null,
+          st.loading ? h('div', { style: S2.hint }, '加载中…') : null,
+          l && l.entries.length === 0 && !st.loading ? h('div', { style: S2.hint }, '（此目录下没有子目录）') : null,
+          l ? l.entries.map(function (en) {
+            return h('div', { key: en.path, style: S2.row },
+              h('div', { style: S2.grow, onClick: function () { loadListing(en.path) }, cursor: 'pointer' }, h('div', { style: S2.nm }, en.name)),
+              h('button', { type: 'button', style: S2.tab, onClick: function () { loadListing(en.path) } }, '进入')
+            )
+          }) : null,
+          l && l.truncated ? h('div', { style: S2.hint }, '目录过多，仅显示开头部分。') : null,
+          h('div', { style: S2.hint }, '当前：' + (l ? l.path : '—')),
+          h('div', { style: S2.foot },
+            h('button', { type: 'button', style: S2.tab, onClick: props.onCancel }, '取消'),
+            h('button', { type: 'button', style: Object.assign({}, S2.tab, S2.tabOn), disabled: !l || busy === true, onClick: function () { if (l) props.onPicked(l.path) } }, '选为工作区')
+          )
+        )
+      }
       var byId = {}
       st.hosts.forEach(function (h) { byId[h.id] = h })
       var worldOf = {}
       st.worlds.forEach(function (w) { worldOf[w.hostId] = w })
-      var bridge = window.dshDesktop
+      // 应用内逐层浏览（远程世界唯一可用的来源；本地世界在系统对话框不可用时也用它）
+      var loadListing = function (path) {
+        var ui = props.ui
+        if (!ui || !ui.listDirectory) { render({ error: '当前载体没有目录枚举能力' }); return }
+        render({ loading: true, error: null })
+        ui.listDirectory(path).then(function (listing) {
+          render({ loading: false, listing: listing })
+        }, function (err) { render({ loading: false, error: String((err && err.message) || err) }) })
+      }
       var pickLocal = function () {
         if (!props.ui || !props.ui.pickDirectory) { props.onError('当前载体没有本地目录选择能力'); return }
         props.ui.pickDirectory().then(function (path) {
           if (path === null || path === undefined) props.onCancel(); else props.onPicked(path)
-        }, function (err) { props.onError(String((err && err.message) || err)) })
+        }, function () {
+          // 系统对话框不可用（后端是应用内 browse，例如远程世界或 SSH 启动）：
+          // 就地切成应用内浏览，而不是把用户堵在报错上。
+          loadListing(undefined)
+          render({ source: 'browse' })
+        })
       }
       var connect = function (hostId) {
-        if (!bridge || !bridge.openRemoteConnection) { render({ error: '桌面端未提供远程连接入口（请从 KCoder 桌面应用中操作）' }); return }
         render({ busy: true, error: null })
-        bridge.openRemoteConnection(hostId).then(function (msg) {
-          render({ busy: false })
-          props.onCancel()
-          if (window.console) console.info('[ssh-remote]', msg)
-        }, function (err) { render({ busy: false, error: String((err && err.message) || err) }) })
+        postJson('/ssh-remote/api/remote-open', { hostId: hostId }).then(function (res) {
+          if (res && res.ok) {
+            render({ busy: false })
+            props.onCancel()
+          } else {
+            render({ busy: false, error: (res && res.error && res.error.message) || '无法请求打开远程窗口' })
+          }
+        }, function (err) { render({ busy: false, error: '请求失败：' + String((err && err.message) || err) }) })
       }
       var provision = function (hostId) {
         render({ busy: true, error: null, log: ['开始引导…'] })
@@ -554,7 +598,9 @@ window.__ModuleLoader__.load({
           if (res && res.ok) {
             var done = res.value && res.value.spec ? res.value.spec.workspace : ''
             render({ busy: false, log: log.concat(['完成：远端工作区 ' + done]) })
-            if (bridge && bridge.remoteWorlds) bridge.remoteWorlds().then(function (w) { render({ worlds: w || [] }) }).catch(function () {})
+            fetch('/ssh-remote/api/worlds').then(function (r) { return r.json() }).then(function (wr) {
+              render({ worlds: wr && wr.ok && wr.value ? wr.value : [] })
+            }).catch(function () {})
           } else {
             render({ busy: false, log: log, error: (res && res.error && res.error.message) || '引导失败', detail: res && res.error && res.error.detail })
           }
@@ -567,7 +613,9 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: Object.assign({}, S2.tab, st.source === 'local' ? S2.tabOn : null), onClick: function () { render({ source: 'local' }) } }, '本机'),
             h('button', { type: 'button', style: Object.assign({}, S2.tab, st.source === 'remote' ? S2.tabOn : null), onClick: function () { render({ source: 'remote' }) } }, '远程主机')
           ),
-          st.source === 'local'
+          st.remote === true
+            ? browser()
+            : st.source === 'local'
             ? h('div', null,
                 h('div', { style: S2.hint }, '用系统目录对话框选择本机目录。'),
                 h('div', { style: S2.foot },
@@ -575,6 +623,8 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', style: Object.assign({}, S2.tab, S2.tabOn), disabled: busy === true, onClick: pickLocal }, '选择目录…')
                 )
               )
+            : st.source === 'browse'
+            ? browser()
             : h('div', null,
                 hosts.length === 0
                   ? h('div', { style: S2.hint }, '还没有配置远程主机。到「设置 → SSH 远程主机」添加一台。')
