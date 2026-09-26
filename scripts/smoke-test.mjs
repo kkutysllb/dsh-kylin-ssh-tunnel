@@ -1505,6 +1505,21 @@ async function t19() {
   check('T19.1 master 退出即失败返回（不等满 deadline，此前要干等约 32s）', r.ok === false && elapsed < 3000, 'elapsed=' + elapsed + 'ms')
   check('T19.2 错误透出 ssh 原文', /Permission denied/.test(String(r.error)), String(r.error))
   check('T19.3 状态 down 且 lastError 有记录', c.stat(H19.id).master === 'down' && /Permission denied/.test(String(c.stat(H19.id).lastError)), JSON.stringify(c.stat(H19.id)))
+
+  // 空 stderr 时不能只报"master 进程已退出"（用户实测遇到，信息不足无从定位）
+  const log2 = []
+  const c2 = new ConnectionManager(connOpts(log2, {
+    spawnFn: (cmd, args, o) => {
+      const child = fakeChild(8900 + log2.length)
+      log2.push({ cmd, args, opts: o, child })
+      if (args.includes('check')) setTimeout(() => child.emitClose(255), 5)
+      else if (args.includes('-N')) setTimeout(() => { child.emitExit(255); child.emitClose(255) }, 20) // 无 stderr
+      else setTimeout(() => child.emitClose(0), 5)
+      return child
+    },
+  }))
+  const r2 = await c2.ensureMaster(H19)
+  check('T19.4 空 stderr 时给出退出码而非含糊文案', r2.ok === false && /exit 255/.test(String(r2.error)), String(r2.error))
 }
 
 const keepAlive = setInterval(() => {}, 1000)
