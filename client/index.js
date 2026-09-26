@@ -486,6 +486,118 @@ window.__ModuleLoader__.load({
         )
       )
     }
+
+    /* ---- 目录来源切换：本机 / 远程主机 ----
+       为什么需要接管：壳的目录对话框只会列本机目录，而远程工作区必须建在它所属的
+       世界里（上游 SSH 世界是进程级的），所以远程来源不是"在本地窗口里选个远端
+       路径"，而是"连到那台机器的窗口去选"。本机来源仍走原有原生对话框。 */
+    var S2 = {
+      mask: { position: 'fixed', inset: 0, zIndex: 2100, background: 'rgba(0,0,0,.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+      dlg: { width: 560, maxWidth: '92vw', maxHeight: '78vh', overflow: 'auto', background: 'var(--dsw-alias-bg-layer-1,#1f1f1f)', border: '1px solid var(--dsw-alias-border-l1,#88888866)', borderRadius: 12, padding: '14px 16px', textAlign: 'left', color: 'var(--dsw-alias-label-primary,inherit)', fontSize: 13 },
+      tabs: { display: 'flex', gap: 6, marginBottom: 12, borderBottom: '1px solid var(--dsw-alias-border-l1,#88888866)', paddingBottom: 10 },
+      tab: { font: 'inherit', fontSize: 12, padding: '4px 12px', borderRadius: 999, border: '1px solid var(--dsw-alias-border-l1,#88888866)', background: 'transparent', color: 'var(--dsw-alias-label-secondary,#bbb)', cursor: 'pointer' },
+      tabOn: { background: 'var(--dsw-alias-bg-layer-2,#2a2a2a)', color: 'var(--dsw-alias-label-primary,#fff)', fontWeight: 600 },
+      row: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', margin: '4px 0', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l1,#88888866)' },
+      grow: { flex: '1 1 auto', minWidth: 0 },
+      nm: { fontWeight: 600, color: 'var(--dsw-alias-label-primary,inherit)' },
+      sub: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary,#888)', marginTop: 2, wordBreak: 'break-all' },
+      hint: { fontSize: 11, color: 'var(--dsw-alias-label-tertiary,#888)', margin: '8px 0' },
+      err: { color: '#e5484d', fontSize: 11, marginTop: 6, wordBreak: 'break-all' },
+      log: { fontSize: 10, fontFamily: 'ui-monospace, monospace', color: 'var(--dsw-alias-label-secondary,#aaa)', whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2,#2a2a2a)', borderRadius: 6, padding: 8, marginTop: 8 },
+      foot: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 },
+    }
+
+    function SshDirectoryFlow(props) {
+      var open = props.open, busy = props.busy
+      var st = useState({ source: 'local', hosts: [], worlds: [], log: null, busy: false, error: null })[0]
+      var set = useState(null)[1]
+      var render = function (patch) { set(function (s) { return Object.assign({}, s, patch) }) }
+      useEffect(function () {
+        if (!open) return
+        render({ error: null })
+        fetch('/ssh-remote/api/hosts').then(function (r) { return r.json() }).then(function (res) {
+          render({ hosts: res && res.ok && res.value ? res.value : [] })
+        }).catch(function () { render({ error: '读取主机列表失败' }) })
+        var bridge = window.dshDesktop
+        if (bridge && bridge.remoteWorlds) {
+          bridge.remoteWorlds().then(function (w) { render({ worlds: w || [] }) }).catch(function () {})
+        }
+      }, [open])
+      if (!open) return null
+      var byId = {}
+      st.hosts.forEach(function (h) { byId[h.id] = h })
+      var worldOf = {}
+      st.worlds.forEach(function (w) { worldOf[w.hostId] = w })
+      var bridge = window.dshDesktop
+      var pickLocal = function () {
+        if (!props.ui || !props.ui.pickDirectory) { props.onError('当前载体没有本地目录选择能力'); return }
+        props.ui.pickDirectory().then(function (path) {
+          if (path === null || path === undefined) props.onCancel(); else props.onPicked(path)
+        }, function (err) { props.onError(String((err && err.message) || err)) })
+      }
+      var connect = function (hostId) {
+        if (!bridge || !bridge.openRemoteConnection) { render({ error: '桌面端未提供远程连接入口（请从 KCoder 桌面应用中操作）' }); return }
+        render({ busy: true, error: null })
+        bridge.openRemoteConnection(hostId).then(function (msg) {
+          render({ busy: false })
+          props.onCancel()
+          if (window.console) console.info('[ssh-remote]', msg)
+        }, function (err) { render({ busy: false, error: String((err && err.message) || err) }) })
+      }
+      var provision = function (hostId) {
+        render({ busy: true, error: null, log: ['开始引导…'] })
+        postJson('/ssh-remote/api/provision', { hostId: hostId }).then(function (res) {
+          var log = (res && res.log) || []
+          if (res && res.ok) {
+            var done = res.value && res.value.spec ? res.value.spec.workspace : ''
+            render({ busy: false, log: log.concat(['完成：远端工作区 ' + done]) })
+            if (bridge && bridge.remoteWorlds) bridge.remoteWorlds().then(function (w) { render({ worlds: w || [] }) }).catch(function () {})
+          } else {
+            render({ busy: false, log: log, error: (res && res.error && res.error.message) || '引导失败', detail: res && res.error && res.error.detail })
+          }
+        }, function (err) { render({ busy: false, error: '引导请求失败：' + String((err && err.message) || err) }) })
+      }
+      var hosts = st.hosts
+      return h('div', { style: S2.mask, onClick: function (e) { if (e.target === e.currentTarget) props.onCancel() } },
+        h('div', { style: S2.dlg },
+          h('div', { style: S2.tabs },
+            h('button', { type: 'button', style: Object.assign({}, S2.tab, st.source === 'local' ? S2.tabOn : null), onClick: function () { render({ source: 'local' }) } }, '本机'),
+            h('button', { type: 'button', style: Object.assign({}, S2.tab, st.source === 'remote' ? S2.tabOn : null), onClick: function () { render({ source: 'remote' }) } }, '远程主机')
+          ),
+          st.source === 'local'
+            ? h('div', null,
+                h('div', { style: S2.hint }, '用系统目录对话框选择本机目录。'),
+                h('div', { style: S2.foot },
+                  h('button', { type: 'button', style: S2.tab, onClick: props.onCancel }, '取消'),
+                  h('button', { type: 'button', style: Object.assign({}, S2.tab, S2.tabOn), disabled: busy === true, onClick: pickLocal }, '选择目录…')
+                )
+              )
+            : h('div', null,
+                hosts.length === 0
+                  ? h('div', { style: S2.hint }, '还没有配置远程主机。到「设置 → SSH 远程主机」添加一台。')
+                  : hosts.map(function (host) {
+                      var world = worldOf[host.id]
+                      return h('div', { key: host.id, style: S2.row },
+                        h('div', { style: S2.grow },
+                          h('div', { style: S2.nm }, host.name || host.id),
+                          h('div', { style: S2.sub }, host.user + '@' + host.host + ':' + host.port),
+                          h('div', { style: S2.sub }, world
+                            ? '已就绪 · 远端工作区可建在 ' + world.workspace
+                            : '未引导（需装 Node 与运行组件）')
+                        ),
+                        h('button', { type: 'button', style: S2.tab, disabled: st.busy === true, onClick: function () { provision(host.id) } }, world ? '重新引导' : '引导'),
+                        h('button', { type: 'button', style: Object.assign({}, S2.tab, world ? S2.tabOn : null), disabled: st.busy !== true && !world, onClick: function () { connect(host.id) } }, '连接')
+                      )
+                    }),
+                h('div', { style: S2.hint }, '远程工作区建在那台机器的世界里——点「连接」会打开它的窗口，在那里用目录对话框逐层点选远端目录。'),
+                st.log ? h('div', { style: S2.log }, st.log.join('\n')) : null,
+                st.error ? h('div', { style: S2.err }, st.error + (st.detail ? '：' + st.detail : '')) : null,
+                h('div', { style: S2.foot }, h('button', { type: 'button', style: S2.tab, onClick: props.onCancel }, '取消'))
+              )
+        )
+      )
+    }
+
     return {
       inject: ['slots'],
       apply: function (ctx) {
@@ -501,6 +613,15 @@ window.__ModuleLoader__.load({
             { name: 'settings.section', id: 'ssh-remote', order: 116, label: 'SSH 远程主机' },
             SshRemoteSettings
           )
+        })
+        // 来源切换：接管两个目录流洞（priority -1 遮蔽内置占用者；上游
+        // ui-slots 的既定遮蔽语义——升序优先级、最低者渲染）。本机来源仍走
+        // 原生对话框，故是超集而非替换。
+        var flowInjected = function () { return { ui: ctx.get('uiWorkspace') } }
+        ;['sidebar.workspaces.directoryFlow', 'conversation.hero.workspace.directoryFlow'].forEach(function (hole) {
+          ctx.slots.inject(hole, function () {
+            return ctx.slots.register({ name: hole, priority: -1, inject: flowInjected }, SshDirectoryFlow)
+          })
         })
       },
     }

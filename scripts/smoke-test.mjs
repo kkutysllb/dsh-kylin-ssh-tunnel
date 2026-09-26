@@ -1236,8 +1236,12 @@ async function t14() {
   const badHooks = t14Hooks()
   const bad = t14LoadClient(source, badHooks, badFetch)
 
-  check('T14.1 客户端以 dsh-ssh-remote 注册并注入两个槽位',
-    chip.id === 'dsh-ssh-remote' && chip.keys.length === 2 && chip.keys.includes(CHIP) && chip.keys.includes(SECTION),
+  // 四个槽位：胶囊 + 设置页 + 两个目录流洞（来源切换对话框）。
+  // 目录流洞是 priority -1 的遮蔽注册：本机来源仍走原生对话框，故是超集而非替换。
+  check('T14.1 客户端以 dsh-ssh-remote 注册并注入四个槽位',
+    chip.id === 'dsh-ssh-remote' && chip.keys.length === 4 && chip.keys.includes(CHIP) && chip.keys.includes(SECTION)
+      && chip.keys.includes('sidebar.workspaces.directoryFlow')
+      && chip.keys.includes('conversation.hero.workspace.directoryFlow'),
     chip.id + ' [' + chip.keys.join(', ') + ']')
 
   // --- 会话头部胶囊 ---
