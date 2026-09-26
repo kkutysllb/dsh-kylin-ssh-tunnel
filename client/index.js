@@ -1,4 +1,5 @@
-// dsh-ssh-remote — browser half（全行内样式，零全局副作用）。
+// dsh-ssh-remote — browser half（样式以内联为主；:hover/:focus-visible 由去重注入的
+// <style> 承载，此外无全局副作用）。设置页配方对齐 dsh-coding-sidebar「侧边卡片」。
 // 会话头部「SSH」胶囊：绿=全部主机可达 / 红=有不可达 / 灰=无主机。
 // 浮窗：每主机状态行（连通性探测/打开设置）+ 刷新。
 window.__ModuleLoader__.load({
@@ -130,23 +131,73 @@ window.__ModuleLoader__.load({
       )
     }
 
-    var FIELDS = [
-      { key: 'id', label: 'id', w: 90 },
-      { key: 'name', label: '名称', w: 110 },
-      { key: 'host', label: '主机', w: 130 },
-      { key: 'user', label: '用户', w: 80 },
-      { key: 'port', label: '端口', w: 55 },
-      { key: 'identityFile', label: '私钥路径', w: 170 },
-      { key: 'jump', label: '跳板', w: 80 },
-      { key: 'defaultCwd', label: '默认目录', w: 110 },
-    ]
+    // ── 设置页样式：对齐 dsh-coding-sidebar「侧边卡片」的 DSH 原生配方
+    //（section 760px 内容列 / group 卡片 l2 描边 r16 layer-3 / 标题+计数徽章 /
+    //  输入与按钮统一令牌 / 主按钮=label-primary 反色填充）。
+    // :hover / :focus-visible / disabled 由下方去重注入的 <style> 承载（行内样式做不到伪类）。
+    var STYLE_ID = 'dsh-ssh-remote-style'
+    var CSS = [
+      '.dsshr-btn,.dsshr-btn-primary,.dsshr-btn-danger,.dsshr-input,.dsshr-textarea{transition:background .12s ease,border-color .12s ease,color .12s ease}',
+      '.dsshr-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#ffffff14);border-color:var(--dsw-alias-interactive-bg-hover-accent,#ffffff3d);color:var(--dsw-alias-label-primary,#f9fafb)}',
+      '.dsshr-btn-primary:hover{background:var(--dsw-alias-button-primary-hover,#ebeef2)}',
+      '.dsshr-btn-danger:hover{background:var(--dsw-alias-interactive-bg-hover-danger,#f25a5a26);border-color:var(--dsw-alias-state-error-primary,#f25a5a);color:var(--dsw-alias-state-error-primary,#f25a5a)}',
+      '.dsshr-btn:focus-visible,.dsshr-btn-primary:focus-visible,.dsshr-btn-danger:focus-visible{outline:2px solid var(--dsw-alias-border-l4,#ffffff33);outline-offset:1px}',
+      '.dsshr-input:focus-visible,.dsshr-textarea:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#7aaaff);outline-offset:1px}',
+      '.dsshr-btn:disabled,.dsshr-btn-primary:disabled{opacity:.45;cursor:not-allowed}',
+      '.dsshr-input:disabled{color:var(--dsw-alias-label-tertiary,#adb2b8);cursor:not-allowed}',
+      '@media (prefers-reduced-motion:reduce){.dsshr-btn,.dsshr-btn-primary,.dsshr-btn-danger,.dsshr-input,.dsshr-textarea{transition:none}}',
+    ].join('\n')
 
-    function inputStyle(w) {
-      return { font: 'inherit', fontSize: 11, width: w, padding: '2px 6px', borderRadius: 6, border: '1px solid var(--dsw-alias-border-l1,#88888866)', background: 'var(--dsw-alias-bg-layer-2,#2a2a2a)', color: 'var(--dsw-alias-label-primary,inherit)' }
+    function ensureStyle() {
+      if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return
+      if (document.getElementById(STYLE_ID)) return
+      var el = document.createElement('style')
+      el.id = STYLE_ID
+      el.textContent = CSS
+      ;(document.head || document.body).appendChild(el)
     }
 
+    var SS = {
+      section: { display: 'flex', flexDirection: 'column', gap: 16, width: '100%', maxWidth: 760, boxSizing: 'border-box' },
+      intro: { margin: 0, padding: '0 2px', fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary,#adb2b8)' },
+      group: { display: 'flex', flexDirection: 'column', gap: 8, padding: 20, boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 16, background: 'var(--dsw-alias-bg-layer-3,#353638)' },
+      groupHeading: { display: 'flex', alignItems: 'baseline', gap: 7, padding: '0 2px 6px', fontSize: 13, lineHeight: '20px', fontWeight: 600, color: 'var(--dsw-alias-label-primary,#f9fafb)' },
+      count: { padding: '1px 8px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-2,#2c2c2e)', fontSize: 11, lineHeight: '16px', fontWeight: 500, color: 'var(--dsw-alias-label-secondary,#cfd3d6)', fontVariantNumeric: 'tabular-nums' },
+      card: { display: 'flex', flexDirection: 'column', gap: 12, padding: '12px 14px', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 12, background: 'var(--dsw-alias-bg-layer-2,#2c2c2e)' },
+      cardHead: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
+      cardTitle: { flex: '1 1 auto', minWidth: 0, fontSize: 13, lineHeight: '20px', fontWeight: 600, color: 'var(--dsw-alias-label-primary,#f9fafb)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+      badge: { flex: 'none', padding: '1px 8px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1,#232324)', fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-secondary,#cfd3d6)' },
+      grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '10px 12px' },
+      field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
+      fieldLabel: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary,#adb2b8)' },
+      input: { width: '100%', boxSizing: 'border-box', padding: '5px 8px', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-3,#353638)', color: 'var(--dsw-alias-label-primary,#f9fafb)', font: 'inherit', fontSize: 13, lineHeight: '20px' },
+      // 禁用态必须走行内样式：行内 color 的优先级高于 .dsshr-input:disabled 的类规则。
+      inputDisabled: { color: 'var(--dsw-alias-label-tertiary,#adb2b8)', cursor: 'not-allowed' },
+      textarea: { width: '100%', boxSizing: 'border-box', minHeight: 120, padding: '8px 10px', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-3,#353638)', color: 'var(--dsw-alias-label-primary,#f9fafb)', fontFamily: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 12, lineHeight: 1.6, resize: 'vertical' },
+      row: { display: 'flex', alignItems: 'flex-end', gap: 8, padding: '2px 2px 0' },
+      actions: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 2px 0' },
+      btn: { flex: 'none', appearance: 'none', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 8, padding: '5px 12px', font: 'inherit', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary,#cfd3d6)', background: 'transparent', cursor: 'pointer' },
+      btnPrimary: { flex: 'none', appearance: 'none', border: '1px solid transparent', borderRadius: 8, padding: '5px 14px', font: 'inherit', fontSize: 13, lineHeight: '20px', background: 'var(--dsw-alias-label-primary,#f9fafb)', color: 'var(--dsw-alias-bg-layer-3,#353638)', cursor: 'pointer' },
+      btnDanger: { flex: 'none', appearance: 'none', border: '1px solid var(--dsw-alias-border-l2,#ffffff1f)', borderRadius: 8, padding: '3px 12px', font: 'inherit', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary,#cfd3d6)', background: 'transparent', cursor: 'pointer' },
+      hint: { padding: '2px 2px 0', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary,#adb2b8)' },
+      empty: { padding: '20px 2px', fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary,#adb2b8)' },
+      ok: { padding: '10px 0 2px', fontSize: 12, lineHeight: '17px', color: 'var(--dsw-alias-state-success-primary,#22c55e)' },
+      error: { padding: '10px 0 2px', fontSize: 12, lineHeight: '17px', color: 'var(--dsw-alias-state-error-primary,#f25a5a)' },
+    }
+
+    var FIELDS = [
+      { key: 'name', label: '名称', ph: '如 生产机' },
+      { key: 'host', label: '主机', ph: 'IP 或域名' },
+      { key: 'user', label: '用户', ph: 'root' },
+      { key: 'port', label: '端口', ph: '22' },
+      { key: 'identityFile', label: '私钥路径', ph: '~/.ssh/id_ed25519' },
+      { key: 'jump', label: '跳板', ph: '可选，跳板主机 id' },
+      { key: 'defaultCwd', label: '默认目录', ph: '可选，如 /srv/app' },
+      { key: 'id', label: 'ID（工具引用）', ph: '保存后生成' },
+    ]
+
     function SshRemoteSettings(props) {
-      // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，表格 .map 即崩）。
+      // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，首帧即崩）。
       var stateRef = useRef(null)
       var render = useState(0)[1]
       stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false }
@@ -221,63 +272,93 @@ window.__ModuleLoader__.load({
       }
 
       var st = stateRef.current
-      var th = { fontSize: 10, color: 'var(--dsw-alias-label-tertiary,#888)', textAlign: 'left', padding: '2px 6px' }
       var canSave = st.dirty && !st.saving
-      return h('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-primary,inherit)' } },
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' } },
-          h('button', { style: S.btn, onClick: addRow }, '+ 新增主机'),
-          h('button', { style: S.btn, onClick: function () { st.importOpen = !st.importOpen; st.importPreview = null; render(function (n) { return n + 1 }) } }, st.importOpen ? '收起导入' : '批量导入'),
-          h('button', { style: S.btn, onClick: exportJson }, '导出 JSON'),
-          h('span', { style: { flex: 1 } }),
-          h('button', { style: Object.assign({}, S.btn, canSave ? {} : { opacity: 0.4 }), disabled: !canSave, onClick: save }, st.saving ? '保存中…' : '保存动态主机')
-        ),
-        st.msg && h('div', { style: { color: '#30a46c', fontSize: 11, margin: '4px 0' } }, st.msg),
-        st.err && h('div', { style: S.err }, st.err),
-        st.importOpen && h('div', { style: { border: '1px solid var(--dsw-alias-border-l1,#88888866)', borderRadius: 8, padding: 8, margin: '8px 0' } },
-          h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 } },
-            h('select', { style: inputStyle(110), value: st.importFormat, onChange: function (e) { st.importFormat = e.target.value; render(function (n) { return n + 1 }) } },
-              h('option', { value: 'sshconfig' }, '~/.ssh/config'),
-              h('option', { value: 'json' }, 'JSON'),
-              h('option', { value: 'yaml' }, 'YAML')
-            ),
-            h('button', { style: S.btn, onClick: function () { doImport(true) } }, '预览'),
-            h('button', { style: S.btn, disabled: !st.importPreview, onClick: function () { doImport(false) } }, '确认导入')
-          ),
-          h('textarea', { style: Object.assign(inputStyle('100%'), { height: 120, resize: 'vertical' }), value: st.importText, placeholder: '粘贴配置文本…', onChange: function (e) { st.importText = e.target.value; render(function (n) { return n + 1 }) } }),
-          st.importPreview && h('div', { style: { marginTop: 6 } },
-            h('div', { style: S.sub }, '解析到 ' + st.importPreview.hosts.length + ' 台；问题 ' + st.importPreview.errors.length + ' 条'),
-            st.importPreview.errors.map(function (e, i) { return h('div', { key: i, style: S.err }, e) }),
-            st.importPreview.hosts.map(function (x, i) { return h('div', { key: i, style: S.sub }, x.id + ' → ' + x.host + (x.jump ? '（经 ' + x.jump + '）' : '')) })
+
+      function fieldOf(row, i, f) {
+        var editable = row.source !== 'static' && f.key !== 'id'
+        var v = row[f.key]
+        return h('label', { key: f.key, style: SS.field },
+          h('span', { style: SS.fieldLabel }, f.label),
+          h('input', {
+            style: editable ? SS.input : Object.assign({}, SS.input, SS.inputDisabled),
+            className: 'dsshr-input',
+            value: v === undefined || v === null ? '' : String(v),
+            disabled: !editable,
+            placeholder: f.ph || '',
+            onChange: function (e) { setCell(i, f.key, e.target.value) },
+          })
+        )
+      }
+
+      return h('div', { style: SS.section },
+        h('p', { style: SS.intro }, 'SSH 远程主机管理：动态主机在此增删改，保存后立即生效（无需重启）；静态主机来自 profile cordis.patch.yml，仅展示。'),
+        st.msg && h('div', { style: SS.ok }, st.msg),
+        st.err && h('div', { style: SS.error }, st.err),
+        h('div', { style: SS.group },
+          h('div', { style: SS.groupHeading }, '动态主机', h('span', { style: SS.count }, st.hosts.length + ' 台')),
+          st.hosts.length === 0 && h('div', { style: SS.empty }, '暂无主机：点下方「新增主机」逐条添加，或用「批量导入」从 ~/.ssh/config、JSON、YAML 导入。'),
+          st.hosts.map(function (row, i) {
+            return h('div', { key: i, style: SS.card, 'data-ssh-host': row.id || 'draft-' + i },
+              h('div', { style: SS.cardHead },
+                h('span', { style: SS.cardTitle }, row.name || row.host || '未命名主机'),
+                h('span', { style: SS.badge }, row.source === 'static' ? '静态' : '动态'),
+                row.source === 'static'
+                  ? h('span', { style: SS.hint }, '来自 cordis.patch.yml')
+                  : h('button', { type: 'button', style: SS.btnDanger, className: 'dsshr-btn-danger', onClick: function () { delRow(i) } }, '删除')
+              ),
+              h('div', { style: SS.grid }, FIELDS.map(function (f) { return fieldOf(row, i, f) })),
+              row.source === 'static' && h('div', { style: SS.hint }, '静态主机不可在此编辑或删除。')
+            )
+          }),
+          h('div', { style: SS.actions },
+            h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: addRow }, '+ 新增主机'),
+            h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { st.importOpen = !st.importOpen; st.importPreview = null; render(function (n) { return n + 1 }) } }, st.importOpen ? '收起导入' : '批量导入'),
+            h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: exportJson }, '导出 JSON'),
+            h('span', { style: { flex: '1 1 auto' } }),
+            h('button', { type: 'button', disabled: !canSave, style: SS.btnPrimary, className: 'dsshr-btn-primary', onClick: save }, st.saving ? '保存中…' : '保存动态主机')
           )
         ),
-        h('div', { style: { overflowX: 'auto', maxWidth: '100%' } },
-          h('table', { style: { borderCollapse: 'collapse', width: '100%' } },
-            h('thead', null, h('tr', null, FIELDS.map(function (f) { return h('th', { key: f.key, style: th }, f.label) }).concat([h('th', { key: 'op', style: th }, '操作')]))),
-            h('tbody', null, st.hosts.map(function (row, i) {
-              return h('tr', { key: i, style: { opacity: row.source === 'static' ? 0.75 : 1 } },
-                FIELDS.map(function (f) {
-                  var editable = row.source !== 'static' && f.key !== 'id'
-                  return h('td', { key: f.key, style: { padding: '2px 4px' } },
-                    h('input', { style: inputStyle(f.w), value: row[f.key] || '', disabled: !editable, title: editable ? '' : '静态主机不可编辑', onChange: function (e) { setCell(i, f.key, e.target.value) } })
-                  )
-                }).concat([
-                  h('td', { key: 'op', style: { padding: '2px 4px' } },
-                    row.source === 'static'
-                      ? h('span', { style: S.sub }, '静态')
-                      : h('button', { style: S.btn, onClick: function () { delRow(i) } }, '删除')
-                  )
-                ])
+        st.importOpen && h('div', { style: SS.group },
+          h('div', { style: SS.groupHeading }, '批量导入'),
+          h('div', { style: SS.row },
+            h('label', { style: SS.field },
+              h('span', { style: SS.fieldLabel }, '配置格式'),
+              h('select', {
+                style: Object.assign({}, SS.input, { width: 130 }),
+                className: 'dsshr-input',
+                value: st.importFormat,
+                onChange: function (e) { st.importFormat = e.target.value; render(function (n) { return n + 1 }) },
+              },
+                h('option', { value: 'sshconfig' }, '~/.ssh/config'),
+                h('option', { value: 'json' }, 'JSON'),
+                h('option', { value: 'yaml' }, 'YAML')
               )
-            }))
+            ),
+            h('span', { style: { flex: '1 1 auto' } }),
+            h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { doImport(true) } }, '预览'),
+            h('button', { type: 'button', style: SS.btnPrimary, className: 'dsshr-btn-primary', disabled: !st.importPreview, onClick: function () { doImport(false) } }, '确认导入')
+          ),
+          h('textarea', {
+            style: SS.textarea,
+            className: 'dsshr-textarea',
+            value: st.importText,
+            placeholder: '粘贴配置文本…',
+            onChange: function (e) { st.importText = e.target.value; render(function (n) { return n + 1 }) },
+          }),
+          st.importPreview && h('div', null,
+            h('div', { style: SS.hint }, '解析到 ' + st.importPreview.hosts.length + ' 台；问题 ' + st.importPreview.errors.length + ' 条'),
+            st.importPreview.errors.map(function (e, i) { return h('div', { key: 'e' + i, style: SS.error }, e) }),
+            st.importPreview.hosts.map(function (x, i) {
+              return h('div', { key: 'h' + i, style: SS.hint }, x.id + ' → ' + x.host + (x.jump ? '（经 ' + x.jump + '）' : ''))
+            })
           )
-        ),
-        h('div', { style: Object.assign({}, S.sub, { marginTop: 8 }) }, '说明：动态主机保存后立即生效（无需重启）；静态主机来自 profile cordis.patch.yml，仅展示。')
+        )
       )
     }
-
     return {
       inject: ['slots'],
       apply: function (ctx) {
+        ensureStyle()
         ctx.slots.inject('conversation.session.header.utilities', function () {
           return ctx.slots.register(
             { name: 'conversation.session.header.utilities', id: 'ssh-remote', order: 116, label: 'SSH' },

@@ -1194,11 +1194,13 @@ function t14Render(hooks, Comp, props) {
 /** 在受控沙箱里执行客户端源码，取出 factory 注册出来的组件。 */
 function t14LoadClient(source, hooks, fetchImpl) {
   const captured = { mod: null }
+  const injected = [] // 记录 <style> 注入，锁「去重注入」契约
   const fn = new Function('window', 'fetch', 'console', 'setTimeout', 'clearTimeout', 'Blob', 'URL', 'document', source)
   fn(
     { __ModuleLoader__: { load: (m) => { captured.mod = m } } },
     fetchImpl, console, setTimeout, clearTimeout,
-    class {}, { createObjectURL: () => 'blob:x', revokeObjectURL() {} }, { createElement: () => ({ click() {} }) },
+    class {}, { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
+    { head: { appendChild: (el) => injected.push(el) }, getElementById: (id) => injected.find(el => el.id === id) || null, createElement: () => ({ click() {} }) },
   )
   const mod = captured.mod.factory((name) => {
     if (name === 'react') return t14React(hooks)
@@ -1207,7 +1209,7 @@ function t14LoadClient(source, hooks, fetchImpl) {
   const comps = {}
   const keys = []
   mod.apply({ slots: { inject: (key, cb) => { keys.push(key); cb() }, register: (opts, Comp) => { comps[opts.name] = Comp; return () => {} } } })
-  return { comps, keys, id: captured.mod.id }
+  return { comps, keys, id: captured.mod.id, injected }
 }
 
 async function t14() {
@@ -1259,11 +1261,14 @@ async function t14() {
 
   const bar = t14Strings(setTree).join('|')
   check('T14.5 设置页渲染出工具栏', bar.includes('+ 新增主机') && bar.includes('批量导入') && bar.includes('导出 JSON'), bar.slice(0, 70))
-  check('T14.6 设置页渲染出表格且初始只有表头', t14Count(setTree, 'table') === 1 && t14Count(setTree, 'tr') === 1, 'tr=' + t14Count(setTree, 'tr'))
+  check('T14.6 初始空状态：无主机卡片且有引导文案',
+    t14PropValues(setTree, 'data-ssh-host').length === 0 && bar.includes('暂无主机'),
+    'cards=' + t14PropValues(setTree, 'data-ssh-host').length)
 
   let addErr
   try { t14Button(setTree, '+ 新增主机').props.onClick(); setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} }) } catch (e) { addErr = e }
-  check('T14.7 点「+ 新增主机」后表格新增一行（st.hosts 可用）', addErr === undefined && t14Count(setTree, 'tr') === 2, addErr && addErr.message)
+  check('T14.7 点「+ 新增主机」后出现一张主机卡片（st.hosts 可用）',
+    addErr === undefined && t14PropValues(setTree, 'data-ssh-host').length === 1, addErr && addErr.message)
 
   let impErr
   try { t14Button(setTree, '批量导入').props.onClick(); setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} }) } catch (e) { impErr = e }
@@ -1272,8 +1277,8 @@ async function t14() {
   await sleep(5)
   setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
   const cells = t14PropValues(setTree, 'value').map(String)
-  check('T14.9 宿主数据回填后表格渲染出该主机', t14Count(setTree, 'tr') === 2 && cells.includes('主机一') && cells.includes('10.0.0.1'),
-    'tr=' + t14Count(setTree, 'tr') + ' cells=' + JSON.stringify(cells.slice(0, 4)))
+  check('T14.9 宿主数据回填后渲染出该主机卡片', t14PropValues(setTree, 'data-ssh-host').length === 1 && cells.includes('主机一') && cells.includes('10.0.0.1'),
+    'cards=' + t14PropValues(setTree, 'data-ssh-host').length + ' cells=' + JSON.stringify(cells.slice(0, 4)))
 
   let badErr, badTree
   try { badTree = t14Render(badHooks, bad.comps[SECTION], { close() {} }); await sleep(5); badTree = t14Render(badHooks, bad.comps[SECTION], { close() {} }) } catch (e) { badErr = e }
@@ -1281,6 +1286,15 @@ async function t14() {
 
   const code = source.split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
   check('T14.11 客户端不再出现 useRef({}) 真值初值', !/useRef\(\{\}\)/.test(code))
+
+  // 样式看齐（dsh-coding-sidebar「侧边卡片」配方）：DSH 原生令牌 + 760px 内容列 + hover/focus 样式表
+  let tokenHit = false
+  t14Walk(setTree, (n) => { if (n.props && n.props.style && JSON.stringify(n.props.style).includes('--dsw-alias-')) tokenHit = true })
+  check('T14.12 设置页走 DSH 原生令牌（与侧边卡片设置页同配方）', tokenHit)
+  const css = settings.injected.map(el => String(el.textContent)).join('\n')
+  check('T14.13 :hover/:focus 样式表去重注入', settings.injected.length === 1
+    && css.includes('.dsshr-btn-primary:hover') && css.includes(':focus-visible') && css.includes('prefers-reduced-motion'),
+    'injected=' + settings.injected.length)
 }
 
 const keepAlive = setInterval(() => {}, 1000)
