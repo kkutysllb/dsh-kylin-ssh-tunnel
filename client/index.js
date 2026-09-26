@@ -204,7 +204,7 @@ window.__ModuleLoader__.load({
       // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，首帧即崩）。
       var stateRef = useRef(null)
       var render = useState(0)[1]
-      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false, pw: {}, probe: {} }
+      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false, pw: {}, probe: {}, target: null }
 
       var load = useCallback(function () {
         fetch('/ssh-remote/api/hosts').then(function (r) { return r.json() }).then(function (res) {
@@ -212,6 +212,10 @@ window.__ModuleLoader__.load({
             stateRef.current.hosts = res.value.map(function (x) { return Object.assign({}, x) })
             stateRef.current.dirty = false
           } else stateRef.current.err = '加载失败'
+          fetch('/ssh-remote/api/target').then(function (r2) { return r2.json() }).then(function (t) {
+            if (t && t.ok) stateRef.current.target = t.value && t.value.active ? t.value.active : null
+            render(function (n) { return n + 1 })
+          }).catch(function () {})
           render(function (n) { return n + 1 })
         }).catch(function () { stateRef.current.err = 'host api unavailable'; render(function (n) { return n + 1 }) })
       }, [])
@@ -270,6 +274,16 @@ window.__ModuleLoader__.load({
           } else st.err = (res && res.error && res.error.message) || '导入失败'
           render(function (n) { return n + 1 })
         }).catch(function () { st.err = '导入请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
+      }
+      function setTarget(i) {
+        var st = stateRef.current
+        var row = st.hosts[i]
+        if (!row.id) { st.err = '请先保存主机（需要 id）后再设为目标'; render(function (n) { return n + 1 }); return }
+        putJson('/ssh-remote/api/target', { hostId: row.id, path: row.defaultCwd || '~' }).then(function (res) {
+          if (res && res.ok) { st.target = res.value && res.value.active; st.err = null; st.msg = '已设为远程目标：' + row.id + ':' + (row.defaultCwd || '~') }
+          else st.err = (res && res.error && res.error.message) || '设置失败'
+          render(function (n) { return n + 1 })
+        }).catch(function () { st.err = '请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
       }
       function testConn(i) {
         var st = stateRef.current
@@ -398,6 +412,15 @@ window.__ModuleLoader__.load({
               h('div', { style: SS.cardHead },
                 h('span', { style: SS.cardTitle }, row.name || row.host || '未命名主机'),
                 h('span', { style: SS.badge }, row.source === 'static' ? '静态' : '动态'),
+                st.target && st.target.hostId === row.id && h('span', { style: Object.assign({}, SS.badge, { color: 'var(--dsw-alias-state-success-primary,#22c55e)' }) }, '★ 当前目标'),
+                h('button', {
+                  type: 'button',
+                  style: Object.assign({}, SS.btn, row.id ? null : { opacity: 0.45, cursor: 'not-allowed' }),
+                  className: 'dsshr-btn',
+                  disabled: !row.id,
+                  title: '把该主机目录设为远程目标（agent 将在此目录干活）',
+                  onClick: function () { setTarget(i) },
+                }, '设为目标'),
                 h('button', {
                   type: 'button',
                   style: Object.assign({}, SS.btn, row.id ? null : { opacity: 0.45, cursor: 'not-allowed' }),

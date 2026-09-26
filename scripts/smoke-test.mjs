@@ -1015,8 +1015,8 @@ async function t12() {
   const tool = (n) => ctx._registeredTools.find(t => t.name === n)
   const names = ctx._registeredTools.map(t => t.name)
 
-  check('T12.1 十个工具都声明了 presentCall/presentResult',
-    names.length === 10 && ctx._registeredTools.every(t => typeof t.presentCall === 'function' && typeof t.presentResult === 'function'),
+  check('T12.1 全部工具都声明了 presentCall/presentResult',
+    names.length === 11 && ctx._registeredTools.every(t => typeof t.presentCall === 'function' && typeof t.presentResult === 'function'),
     names.filter(n => { const t = tool(n); return typeof t.presentCall !== 'function' || typeof t.presentResult !== 'function' }).join(','))
 
   // ssh_run：terminal 卡（命令为题、主机为描述）
@@ -1538,6 +1538,47 @@ async function t19() {
   check('T19.5 master exit 0（daemon 化）不得判失败', r3.ok === true, JSON.stringify(r3))
 }
 
+
+// ================= T20 远程目标绑定（targets.js + API） =================
+import { TargetStore } from '../lib/targets.js'
+
+async function t20() {
+  console.log('== T20 远程目标绑定 ==')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t20-'))
+  const store = new TargetStore({ file: path.join(tmp, 'targets.json') })
+  check('T20.1 初始无目标', store.active() === null && store.activePathFor('h1') === null)
+  store.bind('/w/proj', 'h1', '/srv/app')
+  const a = store.active()
+  check('T20.2 绑定即活跃', a && a.workspace === '/w/proj' && a.hostId === 'h1' && a.path === '/srv/app', JSON.stringify(a))
+  check('T20.3 默认 cwd 仅对目标主机生效', store.activePathFor('h1') === '/srv/app' && store.activePathFor('h2') === null)
+  store.bind('/w/other', 'h2', '/data')
+  check('T20.4 多工作区互不覆盖', store.get('/w/proj').path === '/srv/app' && store.active().workspace === '/w/other', JSON.stringify(store.list()))
+  store.setActive('/w/proj')
+  check('T20.5 切回工作区即切回目标', store.active().hostId === 'h1' && store.activePathFor('h2') === null)
+  check('T20.6 解绑不影响其它', store.unbind('/w/proj') === true && store.get('/w/proj') === null && store.get('/w/other').path === '/data')
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t20b-'))
+  const ctx = fakeCtx()
+  const inst = apply(ctx, { hosts: [{ id: 'h1', name: '机', host: '1.1.1.1', user: 'root', identityFile: '/k' }], hostsFile: path.join(tmpDir, 'hosts.json') })
+  const api = inst.handleApi
+  const H = { host: '127.0.0.1:1' }
+  const mkRes = () => { const r = {}; r.writeHead = (s2) => { r.status = s2 }; r.end = (b) => { r.body = b }; return r }
+  const call = async (method, url, bodyObj) => {
+    const res = mkRes()
+    api({ method, url, headers: H }, res, bodyObj === undefined ? undefined : JSON.stringify(bodyObj))
+    await sleep(20)
+    return { status: res.status, body: JSON.parse(res.body || '{}') }
+  }
+  const r1 = await call('PUT', '/ssh-remote/api/target', { workspace: '/w/a', hostId: 'h1', path: '/srv' })
+  check('T20.7 PUT 绑定目标', r1.status === 200 && r1.body.value.active.hostId === 'h1', JSON.stringify(r1.body.value).slice(0, 120))
+  const r2 = await call('GET', '/ssh-remote/api/target')
+  check('T20.8 GET 读回绑定', r2.body.value.active.path === '/srv' && '/w/a' in r2.body.value.bindings, JSON.stringify(r2.body.value).slice(0, 120))
+  const r3 = await call('PUT', '/ssh-remote/api/target', { workspace: '/w/a', hostId: 'nope', path: '/x' })
+  check('T20.9 未知主机 404', r3.status === 404, String(r3.status))
+  const r4 = await call('POST', '/ssh-remote/api/target/unbind', { workspace: '/w/a' })
+  check('T20.10 解绑接口', r4.status === 200 && r4.body.value.removed === true && r4.body.value.active === null, JSON.stringify(r4.body.value))
+}
+
 const keepAlive = setInterval(() => {}, 1000)
 async function main() {
   await t2()
@@ -1558,6 +1599,7 @@ async function main() {
   await t17()
   await t18()
   await t19()
+  await t20()
   clearInterval(keepAlive)
   summary()
   // fs.watch（HostRegistry.startWatch）会吊住事件循环，主动收尾退出
