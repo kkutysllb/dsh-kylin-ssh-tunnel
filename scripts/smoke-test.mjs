@@ -1220,7 +1220,9 @@ async function t14() {
   const okFetch = (url) => Promise.resolve({
     json: () => Promise.resolve(String(url).includes('/status')
       ? { ok: true, value: { hosts: [{ id: 'm1', name: '主机一' }], connections: [] } }
-      : hostsBody),
+      : String(url).includes('/probe')
+        ? { ok: true, value: { hostId: 'm1', ok: true, degraded: false, latencyMs: 12 } }
+        : hostsBody),
   })
   const badFetch = () => Promise.reject(new Error('offline'))
 
@@ -1334,6 +1336,20 @@ async function t14() {
   const afterVals = t14PropValues(setTree, 'value').map(String)
   check('T14.16 密码输入为 password 型且保存后清空', pwErr === undefined && !afterVals.includes('pw-机密-123'), JSON.stringify(afterVals.slice(0, 4)))
   check('T14.17 保存后给出加密库提示且未回显密码', afterPw.includes('加密凭据库') && afterPw.includes('root@10.1.2.3') && !afterPw.includes('pw-机密-123'), afterPw.slice(0, 140))
+
+  // ── 测试连接入口（此前只在会话头部胶囊浮窗里，设置页缺失）──
+  setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  const testBtn = t14Button(setTree, '测试连接')
+  check('T14.18 卡片提供「测试连接」入口', testBtn !== undefined && testBtn.props.disabled === false, testBtn === undefined ? '无按钮' : String(testBtn.props.disabled))
+  let probeErr
+  try {
+    testBtn.props.onClick()
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+    await sleep(5)
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  } catch (e) { probeErr = e }
+  const probeText = t14Strings(setTree).join('|')
+  check('T14.19 测试结果就地展示（连通/延迟）', probeErr === undefined && probeText.includes('✓ 连通') && probeText.includes('12ms'), probeText.slice(0, 140))
 }
 
 
@@ -1428,6 +1444,42 @@ async function t17() {
   check('T17.7 缺密码 400', resBad.status === 400, String(resBad.status))
 }
 
+
+// ================= T18 保存兜底：缺 id 自动补全（回归"保存后计数 0"） =================
+async function t18() {
+  console.log('== T18 保存兜底：缺 id 自动补全 ==')
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t18-'))
+  const hostsFile = path.join(tmpDir, 'hosts.json')
+  const ctx = fakeCtx()
+  const inst = apply(ctx, { hosts: [], hostsFile })
+  const api = inst.handleApi
+  const H = { host: '127.0.0.1:1' }
+  const mkRes = () => { const r = {}; r.writeHead = (s) => { r.status = s }; r.end = (b) => { r.body = b }; return r }
+  const call = async (method, url, bodyObj) => {
+    const res = mkRes()
+    api({ method, url, headers: H }, res, bodyObj === undefined ? undefined : JSON.stringify(bodyObj))
+    await sleep(20)
+    return { status: res.status, body: JSON.parse(res.body || '{}') }
+  }
+
+  const r1 = await call('POST', '/ssh-remote/api/hosts/bulk', { hosts: [{ name: '生产机', host: '10.0.0.1', user: 'root' }] })
+  check('T18.1 缺 id 的条目被自动补全并保存', r1.status === 200 && r1.body.value.length === 1 && /^[a-z0-9_-]+$/.test(r1.body.value[0].id), JSON.stringify(r1.body.value).slice(0, 120))
+  check('T18.2 补 id 后无 warnings', (r1.body.warnings || []).length === 0, JSON.stringify(r1.body.warnings))
+
+  const r2 = await call('POST', '/ssh-remote/api/hosts/bulk', { hosts: [{ name: '同名', host: '10.0.0.5' }, { name: '同名', host: '10.0.0.5' }] })
+  const ids = (r2.body.value || []).map(h => h.id)
+  check('T18.3 同 slug 条目 id 去重', r2.status === 200 && r2.body.value.length === 2 && new Set(ids).size === 2, JSON.stringify(ids))
+
+  const r3 = await call('GET', '/ssh-remote/api/hosts')
+  check('T18.4 保存后重新拉取列表非空（回归：保存后计数 0）', r3.body.value.length === 2, JSON.stringify(r3.body.value.map(h => h.id)))
+
+  const r4 = await call('POST', '/ssh-remote/api/hosts/bulk', { hosts: [{ name: '缺主机地址' }] })
+  check('T18.5 真非法条目进 warnings 而非静默', r4.status === 200 && (r4.body.warnings || []).length === 1, JSON.stringify(r4.body.warnings))
+
+  const r5 = await call('POST', '/ssh-remote/api/hosts', { name: '单条', host: '10.0.0.9' })
+  check('T18.6 单条创建缺 id 同样自动补全', r5.status === 200 && (r5.body.value || []).some(h => h.host === '10.0.0.9' && /^[a-z0-9_-]+$/.test(h.id)), JSON.stringify(r5.body.value).slice(0, 120))
+}
+
 const keepAlive = setInterval(() => {}, 1000)
 async function main() {
   await t2()
@@ -1446,6 +1498,7 @@ async function main() {
   await t15()
   await t16()
   await t17()
+  await t18()
   clearInterval(keepAlive)
   summary()
   // fs.watch（HostRegistry.startWatch）会吊住事件循环，主动收尾退出

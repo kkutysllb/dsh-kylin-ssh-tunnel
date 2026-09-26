@@ -204,7 +204,7 @@ window.__ModuleLoader__.load({
       // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，首帧即崩）。
       var stateRef = useRef(null)
       var render = useState(0)[1]
-      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false, pw: {} }
+      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false, pw: {}, probe: {} }
 
       var load = useCallback(function () {
         fetch('/ssh-remote/api/hosts').then(function (r) { return r.json() }).then(function (res) {
@@ -251,8 +251,13 @@ window.__ModuleLoader__.load({
         render(function (n) { return n + 1 })
         postJson('/ssh-remote/api/hosts/bulk', { hosts: st.hosts.filter(function (x) { return x.source !== 'static' }) }).then(function (res) {
           st.saving = false
-          if (res && res.ok) { st.msg = '已保存（' + st.hosts.filter(function (x) { return x.source !== 'static' }).length + ' 台动态主机）'; load() }
-          else st.err = (res && res.error && res.error.message) || '保存失败'
+          if (res && res.ok) {
+            var warns = res.warnings || []
+            var dyn = (res.value || []).filter(function (x) { return x.source !== 'static' }).length
+            st.msg = '已保存（' + dyn + ' 台动态主机）' + (warns.length ? '；' + warns.length + ' 条被拒绝' : '')
+            st.err = warns.length ? warns.slice(0, 3).join('；') : null
+            load()
+          } else st.err = (res && res.error && res.error.message) || '保存失败'
           render(function (n) { return n + 1 })
         }).catch(function () { st.saving = false; st.err = '保存请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
       }
@@ -265,6 +270,18 @@ window.__ModuleLoader__.load({
           } else st.err = (res && res.error && res.error.message) || '导入失败'
           render(function (n) { return n + 1 })
         }).catch(function () { st.err = '导入请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
+      }
+      function testConn(i) {
+        var st = stateRef.current
+        var row = st.hosts[i]
+        if (!row.id) return
+        st.probe[i] = { pending: true }
+        render(function (n) { return n + 1 })
+        postJson('/ssh-remote/api/probe', { hostId: row.id }).then(function (res) {
+          if (res && res.ok) st.probe[i] = { ok: !!res.value.ok, degraded: !!res.value.degraded, latencyMs: res.value.latencyMs, error: res.value.error }
+          else st.probe[i] = { ok: false, error: (res && res.error && res.error.message) || '探测失败' }
+          render(function (n) { return n + 1 })
+        }).catch(function () { st.probe[i] = { ok: false, error: '请求失败（host api unavailable）' }; render(function (n) { return n + 1 }) })
       }
       function savePw(i) {
         var st = stateRef.current
@@ -352,7 +369,7 @@ window.__ModuleLoader__.load({
       }
 
       function fieldOf(row, i, f) {
-        var editable = row.source !== 'static' && f.key !== 'id'
+        var editable = row.source !== 'static'
         var v = row[f.key]
         return h('label', { key: f.key, style: SS.field },
           h('span', { style: SS.fieldLabel }, f.label),
@@ -372,17 +389,29 @@ window.__ModuleLoader__.load({
         st.msg && h('div', { style: SS.ok }, st.msg),
         st.err && h('div', { style: SS.error }, st.err),
         h('div', { style: SS.group },
-          h('div', { style: SS.groupHeading }, '动态主机', h('span', { style: SS.count }, st.hosts.length + ' 台')),
+          h('div', { style: SS.groupHeading }, '主机', h('span', { style: SS.count }, st.hosts.length + ' 台')),
           st.hosts.length === 0 && h('div', { style: SS.empty }, '暂无主机：点下方「新增主机」逐条添加，或用「批量导入」从 ~/.ssh/config、JSON、YAML 导入。'),
           st.hosts.map(function (row, i) {
             return h('div', { key: i, style: SS.card, 'data-ssh-host': row.id || 'draft-' + i },
               h('div', { style: SS.cardHead },
                 h('span', { style: SS.cardTitle }, row.name || row.host || '未命名主机'),
                 h('span', { style: SS.badge }, row.source === 'static' ? '静态' : '动态'),
+                h('button', {
+                  type: 'button',
+                  style: Object.assign({}, SS.btn, row.id ? null : { opacity: 0.45, cursor: 'not-allowed' }),
+                  className: 'dsshr-btn',
+                  disabled: !row.id,
+                  title: row.id ? '建立连接并测连通性' : '保存后可测试（需要 id）',
+                  onClick: function () { testConn(i) },
+                }, (st.probe[i] && st.probe[i].pending) ? '测试中…' : '测试连接'),
                 row.source === 'static'
                   ? h('span', { style: SS.hint }, '来自 cordis.patch.yml')
                   : h('button', { type: 'button', style: SS.btnDanger, className: 'dsshr-btn-danger', onClick: function () { delRow(i) } }, '删除')
               ),
+              st.probe[i] && !st.probe[i].pending && h('div', { style: st.probe[i].ok ? SS.ok : SS.error },
+                st.probe[i].ok
+                  ? ('✓ 连通' + (st.probe[i].degraded ? '（降级直连）' : '') + (st.probe[i].latencyMs !== undefined && st.probe[i].latencyMs !== null ? ' · ' + st.probe[i].latencyMs + 'ms' : ''))
+                  : ('✗ ' + (st.probe[i].error || '连接失败'))),
               h('div', { style: SS.grid }, fieldsOf(row, i)),
               row.source === 'static' && h('div', { style: SS.hint }, '静态主机不可在此编辑或删除。')
             )

@@ -39,6 +39,8 @@ dsh plugin --profile web add dsh-ssh-remote
 ```
 
 动态主机：设置页「SSH 远程主机」区块添加/导入，写入 `~/.dsh/ssh-remote/hosts.json`，**热生效**。
+`id` 可留空——服务端自动补（name/host 的 slug + 计数去重），保存后可改；每张主机卡片带
+「测试连接」按钮就地看连通性与延迟。
 
 ## 登录方式与凭据（v0.1.2 起）
 
