@@ -334,12 +334,14 @@ window.__ModuleLoader__.load({
       function pwField(row, i) {
         var st = stateRef.current
         var edit = st.pw[i]
-        return h('div', { key: 'pw', style: SS.field },
+        // 跨 2 列 + 允许换行：编辑态是"输入框 + 保存 + 取消"一行，单格宽度装不下，
+        // 会溢出到下一格并被其输入框压住（用户点不到保存 → 密码存不上）。
+        return h('div', { key: 'pw', style: Object.assign({}, SS.field, { gridColumn: 'span 2' }) },
           h('span', { style: SS.fieldLabel }, '登录密码'),
           edit && edit.editing
-            ? h('div', { style: { display: 'flex', gap: 6, minWidth: 0 } },
+            ? h('div', { style: { display: 'flex', gap: 6, minWidth: 0, flexWrap: 'wrap' } },
                 h('input', {
-                  style: Object.assign({}, SS.input, { width: 150 }),
+                  style: Object.assign({}, SS.input, { width: 'auto', flex: '1 1 130px', minWidth: 0 }),
                   className: 'dsshr-input',
                   type: 'password',
                   value: edit.value,
@@ -349,7 +351,7 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', style: SS.btnPrimary, className: 'dsshr-btn-primary', onClick: function () { savePw(i) } }, '保存'),
                 h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { st.pw[i] = null; render(function (n) { return n + 1 }) } }, '取消')
               )
-            : h('div', { style: { display: 'flex', gap: 6, minWidth: 0 } },
+            : h('div', { style: { display: 'flex', gap: 6, minWidth: 0, flexWrap: 'wrap' } },
                 h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { st.pw[i] = { editing: true, value: '' }; render(function (n) { return n + 1 }) } }, row.hasPassword ? '已设置 · 更换' : '设置密码'),
                 row.hasPassword && h('button', { type: 'button', style: SS.btnDanger, className: 'dsshr-btn-danger', onClick: function () { clearPw(i) } }, '清除')
               )

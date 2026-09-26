@@ -1319,6 +1319,9 @@ async function t14() {
   const pwText = t14Strings(setTree).join('|')
   const modeVals = t14PropValues(setTree, 'value').map(String)
   check('T14.15 切到密码模式显示密码控件', selErr === undefined && pwText.includes('登录密码') && pwText.includes('设置密码') && modeVals.includes('password'), pwText.slice(0, 120))
+  let pwCell
+  t14Walk(setTree, (n) => { if (pwCell === undefined && n.props && n.props.style && n.props.style.gridColumn === 'span 2') pwCell = n })
+  check('T14.15b 密码格跨 2 列（避免保存按钮溢出到下一格被压住）', pwCell !== undefined)
 
   let pwErr
   try {
@@ -1480,6 +1483,30 @@ async function t18() {
   check('T18.6 单条创建缺 id 同样自动补全', r5.status === 200 && (r5.body.value || []).some(h => h.host === '10.0.0.9' && /^[a-z0-9_-]+$/.test(h.id)), JSON.stringify(r5.body.value).slice(0, 120))
 }
 
+
+// ================= T19 建连失败快返回（回归"一直测试中"） =================
+async function t19() {
+  console.log('== T19 建连失败快返回 ==')
+  const H19 = { id: 'h19', host: '9.9.9.9', user: 'root', port: 22, identityFile: '', auth: 'password', connectTimeoutSec: 2, controlPersistSec: 600 }
+  const log = []
+  const t0 = Date.now()
+  const c = new ConnectionManager(connOpts(log, {
+    spawnFn: (cmd, args, o) => {
+      const child = fakeChild(8800 + log.length)
+      log.push({ cmd, args, opts: o, child })
+      if (args.includes('check')) setTimeout(() => child.emitClose(255), 5)
+      else if (args.includes('-N')) setTimeout(() => { child.writeErr('Permission denied (publickey,password).'); child.emitExit(255); child.emitClose(255) }, 20) // 真实子进程 exit+close 都会发
+      else setTimeout(() => child.emitClose(0), 5)
+      return child
+    },
+  }))
+  const r = await c.ensureMaster(H19)
+  const elapsed = Date.now() - t0
+  check('T19.1 master 退出即失败返回（不等满 deadline，此前要干等约 32s）', r.ok === false && elapsed < 3000, 'elapsed=' + elapsed + 'ms')
+  check('T19.2 错误透出 ssh 原文', /Permission denied/.test(String(r.error)), String(r.error))
+  check('T19.3 状态 down 且 lastError 有记录', c.stat(H19.id).master === 'down' && /Permission denied/.test(String(c.stat(H19.id).lastError)), JSON.stringify(c.stat(H19.id)))
+}
+
 const keepAlive = setInterval(() => {}, 1000)
 async function main() {
   await t2()
@@ -1499,6 +1526,7 @@ async function main() {
   await t16()
   await t17()
   await t18()
+  await t19()
   clearInterval(keepAlive)
   summary()
   // fs.watch（HostRegistry.startWatch）会吊住事件循环，主动收尾退出
