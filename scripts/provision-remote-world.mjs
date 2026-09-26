@@ -20,7 +20,9 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 /** dsh-ssh 及其 provider 的版本线；须与 KCoder 基线的 @deepseek-ai/* 同线。 */
 const SSH_PACKAGE_VERSION = '0.1.7-rc.2'
@@ -42,7 +44,7 @@ const HELPER_PACKAGES = [
 const CORDIS_VERSION = '4.0.4'
 
 function parseArgs(argv) {
-  const out = { ssh: undefined, root: '$HOME/.dsh-remote', workspace: '$HOME/dsh-ws', nodeVersion: 'v24.21.0', out: undefined }
+  const out = { ssh: undefined, root: '$HOME/.dsh-remote', workspace: '$HOME/dsh-ws', nodeVersion: 'v24.21.0', out: undefined, register: false, hostId: undefined, name: undefined }
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
     const value = argv[i + 1]
@@ -52,6 +54,9 @@ function parseArgs(argv) {
       case '--workspace': out.workspace = value; i++; break
       case '--node-version': out.nodeVersion = value; i++; break
       case '--out': out.out = value; i++; break
+      case '--register': out.register = true; break
+      case '--host-id': out.hostId = value; i++; break
+      case '--name': out.name = value; i++; break
       case '--help': case '-h': out.help = true; break
       default: throw new Error(`未知参数：${key}`)
     }
@@ -65,7 +70,11 @@ const USAGE = `用法：node scripts/provision-remote-world.mjs --ssh <别名> [
   --root <远端路径>     Node 与 helper 的安装根（默认 $HOME/.dsh-remote）
   --workspace <远端路径> 远端默认工作区（默认 $HOME/dsh-ws）
   --node-version <v>    远端 Node 版本（默认 v24.21.0，需 >=22.19 或 >=24）
-  --out <文件>          overlay YAML 输出路径（缺省打印到 stdout）`
+  --out <文件>          overlay YAML 输出路径（缺省打印到 stdout）
+  --register            把世界描述写入 <DSH_HOME>/ssh-remote/worlds.json，
+                        供 KCoder「远程」菜单起逐主机 sidecar
+  --host-id <id>        注册用的主机 id（默认取别名）
+  --name <名称>         注册用的展示名（默认取别名）`
 
 /** 在远端执行一段 bash（脚本经 stdin 传入，避免引号地狱）。 */
 function remote(sshAlias, script) {
@@ -142,6 +151,33 @@ function emitOverlay({ alias, node, helper, helperHash, workspace }) {
     - id: directory-picker-browse-surface
       name: "@deepseek-ai/dsh-client-ui-directory-picker-browse"
 `
+}
+
+/**
+ * 把世界描述 upsert 进 `<DSH_HOME>/ssh-remote/worlds.json`。
+ *
+ * 与插件主机注册表同目录同 home 口径（插件 harnessHome()：QILIN_HOME →
+ * DSH_HOME → ~/.dsh；KCoder 侧 dshHome()：DSH_HOME → ~/.kcoder），
+ * 但**分文件**：那份是主机与凭据，这份是「已引导就绪」的世界参数
+ * （Node/helper/摘要/工作区）——前者可手填，后者只能由引导产出。
+ * @param spec - 已引导就绪的世界描述。
+ * @param home - DSH 家目录。
+ */
+function registerWorld(spec, home) {
+  const dir = join(home, 'ssh-remote')
+  const file = join(dir, 'worlds.json')
+  mkdirSync(dir, { recursive: true })
+  let worlds = []
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    if (Array.isArray(parsed)) worlds = parsed
+  } catch {
+    // 首次注册或缺损文件：从空表重建，覆盖式写入。
+  }
+  const next = worlds.filter((w) => w && w.hostId !== spec.hostId)
+  next.push(spec)
+  writeFileSync(file, `${JSON.stringify(next, undefined, 2)}\n`)
+  return file
 }
 
 function main() {
@@ -227,6 +263,20 @@ printf '{"node":"%s","helper":"%s","hash":"%s","workspace":"%s"}' \\
     writeFileSync(args.out, overlay)
     console.log(`\noverlay 已写入 ${args.out}`)
   }
+  if (args.register === true) {
+    const home = process.env.DSH_HOME && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.kcoder')
+    const file = registerWorld({
+      hostId: args.hostId ?? args.ssh,
+      name: args.name ?? args.ssh,
+      alias: args.ssh,
+      node: result.node,
+      helper: result.helper,
+      helperHash: result.hash,
+      workspace: result.workspace,
+    }, home)
+    console.log(`\n世界描述已注册：${file}`)
+  }
+
   console.log(`\n完成。node=${result.node}\n      helper=${result.helper}\n      hash=${result.hash}\n      workspace=${result.workspace}`)
 }
 
