@@ -901,7 +901,7 @@ async function t11() {
   const hostsFile = path.join(tmpDir, 'hosts.json')
 
   const ctx = fakeCtx()
-  apply(ctx, { hosts: [], hostsFile })
+  const inst = apply(ctx, { hosts: [], hostsFile })
   const routes = []
   ctx._injects.forEach(([names, fn]) => {
     if (names.includes('webServer')) {
@@ -913,6 +913,11 @@ async function t11() {
   })
   check('T11.1 路由注册', routes.length === 1 && routes[0].path === '/ssh-remote/api', JSON.stringify(routes.map(r => r.path)))
   const handler = routes[0].handler
+  // dsh 0.1.7 WebRoute 契约：注册的 handler 严格 (req, res) 两参
+  check('T11.1b WebRoute handler 严格两参', typeof handler === 'function' && handler.length === 2, String(handler.length))
+  // 路由体（含测试用 body 注入第三参）挂在 apply 返回实例上，供测试/调试使用
+  const api = inst.handleApi
+  check('T11.1c 内部路由体暴露且可注入 body', typeof api === 'function' && api.length === 3, String(api && api.length))
 
   const mkRes = () => { const r = {}; r.writeHead = (s) => { r.status = s }; r.end = (b) => { r.body = b }; return r }
 
@@ -926,25 +931,25 @@ async function t11() {
 
   // hosts CRUD
   const resC = mkRes()
-  handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resC, JSON.stringify({ id: 'd1', name: '动态机', host: '1.1.1.1', identityFile: '/k' }))
+  api({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resC, JSON.stringify({ id: 'd1', name: '动态机', host: '1.1.1.1', identityFile: '/k' }))
   await sleep(30)
   check('T11.3 新增动态主机 200', resC.status === 200 && JSON.parse(resC.body).ok === true, resC.body)
   check('T11.4 落盘 hostsFile', readHostsFile(hostsFile).some(h => h.id === 'd1'))
 
   // bulk 替换
   const resB = mkRes()
-  handler({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: 'localhost' } }, resB, JSON.stringify({ hosts: [{ id: 'd2', host: '2.2.2.2', identityFile: '/k' }] }))
+  api({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: 'localhost' } }, resB, JSON.stringify({ hosts: [{ id: 'd2', host: '2.2.2.2', identityFile: '/k' }] }))
   await sleep(30)
   check('T11.5 bulk 替换动态集', readHostsFile(hostsFile).length === 1 && readHostsFile(hostsFile)[0].id === 'd2')
 
   // import 预览 + 提交
   const resI = mkRes()
-  handler({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n' }))
+  api({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n' }))
   await sleep(30)
   const pv = JSON.parse(resI.body)
   check('T11.6 import 预览不落盘', pv.ok === true && pv.value.preview.hosts.length === 1 && readHostsFile(hostsFile).length === 1, resI.body)
   const resI2 = mkRes()
-  handler({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI2, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n', commit: true }))
+  api({ method: 'POST', url: '/ssh-remote/api/hosts/import', headers: { host: '127.0.0.1:1' } }, resI2, JSON.stringify({ format: 'sshconfig', text: 'Host web\n  HostName 3.3.3.3\n  IdentityFile /k\n', commit: true }))
   await sleep(30)
   check('T11.7 import 提交落盘', readHostsFile(hostsFile).some(h => h.id === 'web'))
 
@@ -961,9 +966,10 @@ async function t11() {
 
   // 静态保护
   const ctx2 = fakeCtx()
-  apply(ctx2, { hosts: [{ id: 'st', host: 'h', identityFile: 'k' }], hostsFile: path.join(tmpDir, 'h2.json') })
+  const inst2 = apply(ctx2, { hosts: [{ id: 'st', host: 'h', identityFile: 'k' }], hostsFile: path.join(tmpDir, 'h2.json') })
   const routes2 = []
   ctx2._injects.forEach(([names, fn]) => names.includes('webServer') && fn({ effect(cb) { cb(); return () => {} }, webServer: { register: (e) => routes2.push(e) } }))
+  const api2 = inst2.handleApi
   const resDel2 = mkRes()
   routes2[0].handler({ method: 'DELETE', url: '/ssh-remote/api/hosts/st', headers: { host: '127.0.0.1:1' } }, resDel2)
   await sleep(30)
@@ -971,15 +977,15 @@ async function t11() {
 
   // bulk 静态冲突 / POST 静态 id / 坏 JSON / 流式 body 生产路径
   const resBC = mkRes()
-  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: '127.0.0.1:1' } }, resBC, JSON.stringify({ hosts: [{ id: 'st', host: 'h2', identityFile: 'k' }] }))
+  api2({ method: 'POST', url: '/ssh-remote/api/hosts/bulk', headers: { host: '127.0.0.1:1' } }, resBC, JSON.stringify({ hosts: [{ id: 'st', host: 'h2', identityFile: 'k' }] }))
   await sleep(30)
   check('T11.11 bulk 静态冲突 409', resBC.status === 409, String(resBC.status))
   const resPC = mkRes()
-  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resPC, JSON.stringify({ id: 'st', host: 'h2', identityFile: 'k' }))
+  api2({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resPC, JSON.stringify({ id: 'st', host: 'h2', identityFile: 'k' }))
   await sleep(30)
   check('T11.12 POST 静态 id 409', resPC.status === 409, String(resPC.status))
   const resBJ = mkRes()
-  routes2[0].handler({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resBJ, '{bad json')
+  api2({ method: 'POST', url: '/ssh-remote/api/hosts', headers: { host: '127.0.0.1:1' } }, resBJ, '{bad json')
   await sleep(30)
   check('T11.13 坏 JSON 400', resBJ.status === 400, String(resBJ.status))
   // 流式 body 生产路径（req 事件流，不经第三参）
@@ -1001,6 +1007,117 @@ async function t11() {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 }
 
+// ================= T12 工具呈现（presentCall/presentResult） =================
+async function t12() {
+  console.log('== T12 工具呈现 ==')
+  const ctx = fakeCtx()
+  apply(ctx, { hosts: [{ id: 'r1', host: '1.2.3.4', identityFile: '/k' }], hostsFile: path.join(os.tmpdir(), 'ssh-remote-t12-' + Date.now() + '.json') })
+  const tool = (n) => ctx._registeredTools.find(t => t.name === n)
+  const names = ctx._registeredTools.map(t => t.name)
+
+  check('T12.1 十个工具都声明了 presentCall/presentResult',
+    names.length === 10 && ctx._registeredTools.every(t => typeof t.presentCall === 'function' && typeof t.presentResult === 'function'),
+    names.filter(n => { const t = tool(n); return typeof t.presentCall !== 'function' || typeof t.presentResult !== 'function' }).join(','))
+
+  // ssh_run：terminal 卡（命令为题、主机为描述）
+  const runCall = tool('ssh_run').presentCall({ hostId: 'r1', command: 'systemctl status nginx', cwd: '/srv' })
+  check('T12.2 ssh_run presentCall 为 terminal 卡', runCall.card === 'terminal' && runCall.title === 'systemctl status nginx' && runCall.description.includes('r1') && runCall.description.includes('/srv'), JSON.stringify(runCall))
+  const runOk = tool('ssh_run').presentResult({ command: 'x' }, { content: [], isError: false, meta: { output: 'ok\n', exitCode: 0 } })
+  check('T12.3 ssh_run presentResult 带 output/exitCode', runOk.card === 'terminal' && runOk.output === 'ok\n' && runOk.exitCode === 0, JSON.stringify(runOk))
+  const runErr = tool('ssh_run').presentResult({ command: 'x' }, { content: [], isError: true, meta: { error: 'ssh: connect timeout' } })
+  check('T12.4 ssh_run 失败回落通用错误卡', runErr.card === 'generic' && String(runErr.title).includes('connect timeout'), JSON.stringify(runErr))
+
+  // ssh_write / ssh_edit：diff 卡（写入无前像；编辑是字面量替换）
+  const wCall = tool('ssh_write').presentCall({ path: '/tmp/a.txt', content: 'hello\n' })
+  check('T12.5 ssh_write presentCall 为 diff 卡且 oldText=null', wCall.card === 'diff' && wCall.diffs[0].path === '/tmp/a.txt' && wCall.diffs[0].oldText === null && wCall.diffs[0].newText === 'hello\n', JSON.stringify(wCall))
+  const eCall = tool('ssh_edit').presentCall({ path: '/tmp/a.txt', oldString: 'a', newString: 'b' })
+  check('T12.6 ssh_edit presentCall 为 diff 卡', eCall.card === 'diff' && eCall.diffs[0].oldText === 'a' && eCall.diffs[0].newText === 'b', JSON.stringify(eCall))
+  const eRes = tool('ssh_edit').presentResult({ path: '/tmp/a.txt', oldString: 'a', newString: 'b' }, { content: [], isError: false, meta: {} })
+  check('T12.7 ssh_edit presentResult 保持 diff（不回落原文）', eRes.card === 'diff' && eRes.diffs[0].newText === 'b', JSON.stringify(eRes))
+  const eErr = tool('ssh_edit').presentResult({ path: '/tmp/a.txt', oldString: 'a' }, { content: [], isError: true, meta: { error: 'stale-edit: 文件已被修改' } })
+  check('T12.8 ssh_edit 失败回落错误卡', eErr.card === 'generic' && String(eErr.title).includes('stale-edit'), JSON.stringify(eErr))
+  // 框架层回放保护：必填参数缺失时 present* 被短路为 undefined（不抛、不猜）
+  check('T12.8b 参数校验失败时 presentCall 短路为 undefined', tool('ssh_edit').presentCall({ path: '/tmp/a.txt' }) === undefined)
+
+  // ssh_grep：presentationMeta 投影 → search/matches 分组
+  const grepTool = tool('ssh_grep')
+  const grepMeta = grepTool.output.presentationMeta({ pattern: 'foo' }, { matches: ['a.js:3:foo', 'a.js:7:bar', 'b.js:1:baz'], truncated: true, total: 9 })
+  check('T12.9 ssh_grep presentationMeta 分组', grepMeta.files.length === 2 && grepMeta.files[0].path === 'a.js' && grepMeta.files[0].matches.length === 2 && grepMeta.files[0].matches[0].lineNumber === 3 && grepMeta.total === 9, JSON.stringify(grepMeta))
+  const grepRes = grepTool.presentResult({ pattern: 'foo' }, { content: [], isError: false, meta: grepMeta })
+  check('T12.10 ssh_grep presentResult 为 search 卡', grepRes.card === 'search' && grepRes.shape === 'matches' && grepRes.truncated === true && grepRes.total === 9, JSON.stringify(grepRes))
+
+  // ssh_glob：presentationMeta 投影 → search/paths
+  const globTool = tool('ssh_glob')
+  const globMeta = globTool.output.presentationMeta({ pattern: '*.js' }, { files: ['a.js', 'b.js'], truncated: false, total: 2 })
+  const globRes = globTool.presentResult({ pattern: '*.js' }, { content: [], isError: false, meta: globMeta })
+  check('T12.11 ssh_glob presentResult 为 paths 搜索卡', globRes.card === 'search' && globRes.shape === 'paths' && globRes.paths.length === 2 && globRes.truncated === false, JSON.stringify(globRes))
+
+  // ssh_read：read 意图 + 行号跟随
+  const rCall = tool('ssh_read').presentCall({ path: '/etc/nginx.conf', offset: 40 })
+  check('T12.12 ssh_read presentCall kind=read 带 locations', rCall.card === 'generic' && rCall.kind === 'read' && rCall.locations[0].path === '/etc/nginx.conf' && rCall.locations[0].line === 40, JSON.stringify(rCall))
+
+  // ssh_push/pull：generic + 主机摘要
+  check('T12.13 ssh_push/pull presentCall 摘要', tool('ssh_push').presentCall({ localPath: '/a', remotePath: '/b' }).title.includes('/a → /b')
+    && tool('ssh_pull').presentCall({ remotePath: '/b', localPath: '/a' }).kind === 'fetch', JSON.stringify(tool('ssh_pull').presentCall({ remotePath: '/b', localPath: '/a' })))
+
+  // 呈现层纪律：空参数/缺 meta/异常载荷都不得抛，且必须给出卡片或 undefined
+  // 注意：引擎只对 schema 合法的参数调用 present*（非法参数短路为 undefined），
+  // 因此这里直接裸调，验证「即使被绕过包装也不抛」。
+  let threw = null
+  const views = []
+  const metas = []
+  try {
+    for (const t of ctx._registeredTools) {
+      views.push(t.presentCall({}), t.presentCall(undefined), t.presentCall(null))
+      views.push(t.presentResult({}, { content: [], isError: false }))
+      views.push(t.presentResult(undefined, { content: [], isError: true, meta: { error: 'e' } }))
+      if (typeof t.output.presentationMeta === 'function') {
+        metas.push(t.output.presentationMeta({}, {}), t.output.presentationMeta(undefined, undefined))
+      }
+    }
+  } catch (e) { threw = e }
+  check('T12.14 呈现层裸调 replay-safe 永不抛', threw === null, threw && String(threw.message))
+  check('T12.15 呈现结果都是卡片或 undefined', views.every(c => c === undefined || (c && typeof c.card === 'string')), JSON.stringify(views.filter(c => c !== undefined && !(c && typeof c.card === 'string'))))
+  check('T12.16 presentationMeta 只返回纯数据', metas.every(m => m && typeof m === 'object' && typeof m.card === 'undefined'), JSON.stringify(metas.filter(m => !m || typeof m !== 'object')))
+
+  ctx._disposers.forEach(d => d())
+}
+
+// ================= T13 插件清单（0.1.7 对齐） =================
+async function t13() {
+  console.log('== T13 插件清单 ==')
+  const root = path.dirname(path.dirname(new URL(import.meta.url).pathname))
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+
+  check('T13.1 dsh/qilin 都是 manifestVersion 1', pkg.dsh.manifestVersion === 1 && pkg.qilin.manifestVersion === 1, JSON.stringify({ dsh: pkg.dsh.manifestVersion, qilin: pkg.qilin.manifestVersion }))
+  check('T13.2 bundle.patch 指向 cordis.patch.yml', pkg.dsh.bundle.patch === './cordis.patch.yml' && pkg.qilin.bundle.patch === './cordis.patch.yml')
+  check('T13.3 client.inject 不再引用已删除的 dsh-client-runtime', pkg.dsh.client.inject.every(n => n !== '@deepseek-ai/dsh-client-runtime'), pkg.dsh.client.inject.join(','))
+  check('T13.4 client.inject 覆盖两个槽位声明方',
+    pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-conversation') && pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-general'),
+    pkg.dsh.client.inject.join(','))
+  check('T13.5 platform=web 且 dsh/qilin 客户端声明一致', pkg.dsh.client.platform === 'web' && JSON.stringify(pkg.dsh.client) === JSON.stringify(pkg.qilin.client))
+
+  // 兼容性检查只看 @deepseek-ai/dsh 与 @deepseek-ai/dsh-* 的 peer：
+  // 范围必须同时覆盖 0.1.x 预发布代（含 0.1.7-rc.2）且不越到 0.2
+  check('T13.6 dsh peer 覆盖 0.1.x 预发布且不越代', pkg.peerDependencies['@deepseek-ai/dsh'] === '>=0.1.0-rc.5 <0.2.0', String(pkg.peerDependencies['@deepseek-ai/dsh']))
+  check('T13.7 dsh-tools peer 覆盖 0.1.x 预发布且不越代', pkg.peerDependencies['@deepseek-ai/dsh-tools'] === '>=0.1.0-rc.5 <0.2.0', String(pkg.peerDependencies['@deepseek-ai/dsh-tools']))
+  check('T13.8 schemastery peer 钉在大版本 3', pkg.peerDependencies['@deepseek-ai/schemastery'] === '>=3.18.0 <4.0.0', String(pkg.peerDependencies['@deepseek-ai/schemastery']))
+  check('T13.9 engines.dsh 与 peer 同口径', pkg.engines && pkg.engines.dsh === '>=0.1.0-rc.5 <0.2.0', JSON.stringify(pkg.engines))
+
+  // 展示元数据：icon + 本地化 title/description（引擎经 exports 读取，必须导出）
+  check('T13.10 exports 导出 package.json 与 locale', pkg.exports['./package.json'] === './package.json' && Boolean(pkg.exports['./locale/*.json']), JSON.stringify(pkg.exports))
+  check('T13.11 files 含 locale 与 icon', pkg.files.includes('locale/**/*.json') && pkg.files.includes('icon.svg'), pkg.files.join(','))
+  const iconPath = path.join(root, pkg.icon)
+  const iconStat = fs.statSync(iconPath)
+  check('T13.12 icon 为 SVG 且不超 256KiB', pkg.icon === 'icon.svg' && iconStat.size < 256 * 1024, pkg.icon + ' ' + iconStat.size)
+  const en = JSON.parse(fs.readFileSync(path.join(root, 'locale/en.json'), 'utf8'))
+  const zh = JSON.parse(fs.readFileSync(path.join(root, 'locale/zh.json'), 'utf8'))
+  check('T13.13 本地化标题/描述齐备（en+zh）',
+    typeof en.meta.title === 'string' && en.meta.title.length > 0 && typeof en.meta.description === 'string' && en.meta.description.length > 0
+    && typeof zh.meta.title === 'string' && zh.meta.title.length > 0 && typeof zh.meta.description === 'string' && zh.meta.description.length > 0,
+    JSON.stringify({ en: en.meta.title, zh: zh.meta.title }))
+}
+
 const keepAlive = setInterval(() => {}, 1000)
 async function main() {
   await t2()
@@ -1013,6 +1130,8 @@ async function main() {
   await t9()
   await t10()
   await t11()
+  await t12()
+  await t13()
   clearInterval(keepAlive)
   summary()
 }

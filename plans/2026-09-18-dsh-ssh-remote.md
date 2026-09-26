@@ -1,5 +1,12 @@
 # dsh-ssh-remote 插件 v1 实施计划
 
+> **状态（2026-09-26）：已实施完成并通过验收。** 本文件保留为设计/实施记录，下方
+> 复选框是当时的推进清单，未逐项回填——以代码与测试为准：
+> `npm run typecheck` + `npm test`（182 断言，T2–T13）。
+> 同日完成 dsh 0.1.7-rc.2 世代对齐（v0.1.2）：peer 范围重写、`client.inject` 清理、
+> HTTP handler 收敛为 `(req, res)`、工具卡片呈现、manifest 现代化（`manifestVersion`
+> + 本地化标题/图标），详见 README「版本兼容」与「开发」两节。
+
 **Goal:** 在本仓库构建 DSH 插件 `ssh-remote`：10 个 ssh_* Agent 工具（执行/读/写/编辑/搜索/推拉）+ ControlMaster 连接层 + 状态胶囊面板 + 设置页可视化配置。
 
 **Architecture:** 双半插件（宿主 lib/ + 浏览器 client/）。宿主端组合五个纯模块：HostRegistry（静态+动态主机合并热重载）→ ConnectionManager（ControlMaster 惰性建连/探活/拆除）→ Runner（spawn 参数数组执行 + 限流/超时/错误分类）→ FsOps/Transfer（文件语义与传输）。index.js apply() 装配工具/系统提示/回环 HTTP API。全部远端操作复用同一条 master 连接。
@@ -64,22 +71,21 @@
     "setup-dev": "node scripts/setup-dev.mjs"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings-general"
       ],
       "platform": "web"
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.5",
-    "@deepseek-ai/schemastery": "^3.18.0",
-    "react": "^18.2.0"
+    "@deepseek-ai/dsh": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4.0.0"
   },
   "license": "MIT"
 }

@@ -6,13 +6,19 @@ DSH（DeepSeek Harness）插件：**SSH 远程运维/开发工具套件**——A
 - **远程文件编辑带防冲突**：读取记 sha256，提交前远端校验，文件被并发修改报 `stale-edit`；
 - 所有命令/路径**参数数组直传**远端 shell，不经本地 shell——无引号地狱；
 - 会话头部**状态胶囊**+面板；设置页**可视化主机管理**（表格 CRUD / 批量导入 / 导出，动态主机保存即生效）；
+- 工具卡片化呈现：`ssh_run` 渲染终端卡（输出+退出码）、`ssh_read` 带文件跟随、`ssh_write`/`ssh_edit` 渲染 diff、`ssh_glob`/`ssh_grep` 渲染搜索卡（带封顶指示）；
 - 回环 HTTP API（非回环 403）。
 
 ## 安装
 
 ```bash
-dsh plugin --profile web add git+https://github.com/<you>/dsh-kkutysllb-ssh-tunnel.git
+dsh plugin --profile web add git+https://github.com/kkutysllb/dsh-kylin-ssh-tunnel.git
+# 或 npm registry（版本可被插件管理检测，用户手动更新）
+dsh plugin --profile web add dsh-ssh-remote
 ```
+
+装完可在设置 → 插件中查看（标题/描述/图标由包内 `locale/{en,zh}.json` 与 `icon.svg` 提供），
+并在会话头部看到 SSH 状态胶囊。
 
 静态主机（可选，重启生效）——profile `cordis.patch.yml`：
 
@@ -33,13 +39,36 @@ dsh plugin --profile web add git+https://github.com/<you>/dsh-kkutysllb-ssh-tunn
 
 动态主机：设置页「SSH 远程主机」区块添加/导入，写入 `~/.dsh/ssh-remote/hosts.json`，**热生效**。
 
-## QiLin（麒麟）双通道适配（v0.1.1 起）
+## 版本兼容（dsh 0.1.7 世代起）
+
+插件按框架契约把宿主侧依赖声明为 `peerDependencies`，并且**范围对预发布代友好**：
+
+| peer | 范围 | 说明 |
+|------|------|------|
+| `@deepseek-ai/dsh` | `>=0.1.0-rc.5 <0.2.0` | 宿主本体（`apps/cli`） |
+| `@deepseek-ai/dsh-tools` | `>=0.1.0-rc.5 <0.2.0` | `defineTool` 契约 |
+| `@deepseek-ai/schemastery` | `>=3.18.0 <4.0.0` | 配置 schema |
+
+宿主在**安装时**与 **profile 加载时**都会校验这些 peer（`evaluatePluginCompatibility()`，
+只检查 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*`），不满足即抛出
+`incompatible-version` 类型化拒绝。校验按 `includePrerelease` 语义做
+`semver.satisfies`，因此 `0.1.7-rc.2` 这类预发布版本能落进 `>=0.1.0-rc.5 <0.2.0`；
+写成 `^0.1.0-rc.5` 在默认 npm/pnpm 语义下反而不匹配 `0.1.7-rc.x`。
+
+确需绕过（例如临时验证更早/更晚的宿主）时，豁免是 profile 内
+`compatibility.json` 的**精确 `name@version` → 运行时版本**对，可经插件管理器 UI，
+或：
+
+```bash
+dsh plugin allow-version @deepseek-ai/dsh-tools@0.1.8 --accept-risk
+```
+
+## QiLin（麒麟）双通道适配（v0.1.1 起，v0.1.2 对齐 dsh 0.1.7-rc.2）
 
 manifest 同时声明 `qilin` 与 `dsh` 两个通道的 `bundle.patch` / `client`：
-QiLin（dsh 0.1.6-alpha.2 合并后）的插件管理器只认原生键
-`qilin.bundle.patch`（缺失会报「没有声明组合包」），DSH 宿主仍读
-`dsh.*`；两通道指向同一份 `cordis.patch.yml` 与 client 交付物，
-行为完全一致。
+QiLin 的插件管理器只认原生键 `qilin.bundle.patch`（缺失会报「没有声明组合包」），
+DSH 宿主读 `dsh.*`；两通道指向同一份 `cordis.patch.yml` 与 client 交付物，
+行为完全一致。两个通道都带 `manifestVersion: 1`（新版清单版本标识）。
 
 ## 麒麟（QiLin）引擎安装
 
@@ -58,15 +87,13 @@ qilin plugin --profile qilin add github:kkutysllb/dsh-kylin-ssh-tunnel
 
 - **必须经 `qilin plugin add` 装进 profile**：包会落到 profile 私有的
   `~/.qilin/profiles/<name>/node_modules`——裸包名原生解析的第一跳。
-  **不要**手工把包目录放进共享的 `~/.qilin/profiles/node_modules`：
-  dsh alpha.2 合并后的 runtime+enforce 解析把该目录划为安装保留区，
-  放那里的 bundle 层包激活时直接 `failed to import`。
-- **引擎版本**：运行需要带 dsh 兼容层的 QiLin 3.0.0+；插件**管理**
-  （设置页展示/启停）要求 3.0.2+（alpha.2 合并后只认
-  `qilin.bundle.patch` 原生键）。
-- **运行时解析**：dsh alpha.2 起依赖解析默认运行时模式（PR #4471），
-  插件运行期导入由 profile 安装图经进程内 generation 解析；引擎包按
-  框架契约声明于 peerDependencies，由宿主安装副本统一解析。
+  **不要**手工把包目录放进共享的 `~/.qilin/profiles/node_modules`：那里是
+  宿主自己的安装保留区，bundle 层包放进去激活时会直接 `failed to import`。
+- **引擎版本**：本仓 v0.1.2 按 QiLin 3.0.4 / dsh 0.1.7-rc.2 世代对齐；早期
+  QiLin 3.0.0+/3.0.2+ 亦在 peer 范围内可用（peer 范围跨 0.1.x 全代）。
+- **运行时解析**：依赖解析为运行时模式，插件运行期导入由 profile 安装图经
+  进程内 generation 解析；引擎包按框架契约声明于 peerDependencies，由宿主
+  安装副本统一解析。
 - **数据根**（hosts.json、ControlMaster socket）按
   `QILIN_HOME → DSH_HOME → ~/.dsh` 解析（QiLin 启动器会把 DSH_HOME
   钉到麒麟家目录）。
@@ -100,15 +127,33 @@ qilin plugin --profile qilin add github:kkutysllb/dsh-kylin-ssh-tunnel
   - hostsFile（`~/.dsh/ssh-remote/hosts.json`）除设置页手工录入外，也支持在设置页从 `~/.ssh/config` 文本批量导入（解析 Host 块/ProxyJump，导入前可预览）；
   - HTTP API 状态码语义：404 = 路由不存在，409 = 冲突（静态主机不可删除/覆盖、id 重复、probe 目标不存在），403 = 非回环访问。
 
+## 结构
+
+- `lib/index.js` —— 插件入口：10 个工具注册、系统提示段（`ssh-remote`）、回环 HTTP 路由、disposer
+- `lib/hosts.js` · `lib/settings-store.js` —— 主机注册表（静态+动态）与动态主机持久化
+- `lib/connection.js` —— ControlMaster 连接层（`-O check` / 失效重建 / `-O exit` 拆除）
+- `lib/exec.js` · `lib/fsops.js` · `lib/transfer.js` —— 命令执行 / 远程文件系统 / 双向传输
+- `lib/home.js` —— 数据根解析（`QILIN_HOME → DSH_HOME → ~/.dsh`）
+- `client/index.js` —— 浏览器半：会话头部状态胶囊 + 设置页「SSH 远程主机」区块
+- `cordis.patch.yml` —— 组合包补丁（dsh/qilin 共用）
+
 ## 开发
 
 ```bash
-npm run setup-dev   # node_modules → ~/.kcoder/profiles/node_modules 符号链接
+npm run setup-dev   # node_modules → 引擎 profile 的符号链接（缺失 peer 仅告警）
 npm run typecheck   # 8 文件 + client 语法检查
-npm test            # 全量冒烟（fake spawn，不碰网络）
+npm test            # 全量冒烟 182 断言（T2–T13，fake spawn，不碰网络）
 # 真机验证（可选）：
 SSH_REMOTE_HOST=1.2.3.4 SSH_REMOTE_KEY=~/.ssh/id_ed25519 npm run live
 ```
+
+维护约定：
+
+- 注册进 `webServer` 的 handler 严格是 `(req, res)` 两参（对齐 dsh 0.1.7 的 `WebRoute` 契约）；
+  测试需要注入 body 时用 `apply()` 返回实例上的 `handleApi(req, res, bodyOverride)`（第三参仅测试面）。
+- 工具呈现（`presentCall` / `presentResult` / `output.presentationMeta`）必须**纯函数、replay-safe、永不抛**：
+  引擎只对 schema 合法的参数调用，非法参数短路为 `undefined`；函数内部仍不得依赖 `execute` 的副作用。
+- 新增宿主侧 peer 依赖时，范围写成 `>=x.y.z-rc.n <next-major`，避免预发布代被 `^` 语义挡在门外。
 
 ## License
 

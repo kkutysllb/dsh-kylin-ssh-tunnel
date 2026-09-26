@@ -2,11 +2,14 @@
 // 使其能在**当前引擎的物理布局**下被解析。
 //
 // 为什么不再整树链接共享保留区（~/.kcoder/profiles/node_modules）：
-// dsh 0.1.6-alpha.2 起依赖解析默认运行时模式（PR #4471），profile 的共享
-// node_modules 被划为安装保留区——不再是解析来源，引擎也不再维护它的
-// 内容；旧脚本整树 symlink 到该目录，运行时升级后大量链接悬空（本仓
-// 2026-09 现场：136 个悬空链接，schemastery 指向已被移除的嵌套提升路径）。
-// 现在按**声明**逐个链接，并从当前引擎安装位取实体，缺谁报谁。
+// dsh 0.1.6-alpha.2 起依赖解析改为运行时模式，profile 的共享 node_modules
+// 被划为安装保留区——不再是解析来源，引擎也不再维护它的内容；旧脚本整树
+// symlink 到该目录，运行时升级后大量链接悬空（本仓 2026-09 现场：136 个
+// 悬空链接，schemastery 指向已被移除的嵌套提升路径）。
+// 0.1.7 世代延续该模型：插件运行期导入由 profile 安装图经进程内 generation
+// 解析，宿主侧框架包（@deepseek-ai/dsh 与 @deepseek-ai/dsh-*）按 peer 声明
+// 由宿主安装副本统一解析。现在按**声明**逐个链接，并从当前引擎安装位取实体，
+// 缺谁报谁——缺失只告警不阻断（见文末说明）。
 //
 // 引擎根候选（按序探测，命中即用）：
 //   1. $KCODER_RUNTIME_NODE_MODULES
@@ -112,8 +115,9 @@ if (process.argv.includes('--prune')) {
 
 console.log(`peer 链接：新建 ${created}，已在位 ${repaired}`)
 if (missing.length > 0) {
-  // 引擎不单发某些 peer（如 react 由 client runtime 内联提供）属正常：
-  // 只提示，不阻断——需要它的是浏览器侧 bundle，开发态由宿主页面供给。
-  console.warn('提示：以下声明 peer 在当前引擎安装位没有独立实体，按内联/宿主供给处理：' + missing.join(', '))
+  // 引擎不单发某些 peer 属正常：@deepseek-ai/dsh 是 CLI 应用包（不在运行时
+  // node_modules 的依赖图里），react 等浏览器侧模块由宿主页面供给。
+  // 只提示，不阻断：缺失的多为宿主侧供给，需要它的场景（真机 live 测试）会另行暴露。
+  console.warn('提示：以下声明 peer 在当前引擎安装位没有独立实体，按宿主供给处理：' + missing.join(', '))
 }
 console.log('开发环境就绪（peer 依赖已按声明链接）')
