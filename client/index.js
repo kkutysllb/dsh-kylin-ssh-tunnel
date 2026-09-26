@@ -35,7 +35,9 @@ window.__ModuleLoader__.load({
 
     function SshRemoteUtility() {
       var wrapRef = useRef(null)
-      var stateRef = useRef({})
+      // useRef(null)：初值必须是假值，下面的 `|| 默认状态` 才会生效（useRef({}) 永远为真值，
+      // 导致 st.data / st.probing 等字段全是 undefined，组件首次渲染即抛错）。
+      var stateRef = useRef(null)
       var render = useState(0)[1]
       stateRef.current = stateRef.current || { data: null, error: null, open: false, pos: null, probing: {} }
 
@@ -144,7 +146,8 @@ window.__ModuleLoader__.load({
     }
 
     function SshRemoteSettings(props) {
-      var stateRef = useRef({})
+      // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，表格 .map 即崩）。
+      var stateRef = useRef(null)
       var render = useState(0)[1]
       stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false }
 

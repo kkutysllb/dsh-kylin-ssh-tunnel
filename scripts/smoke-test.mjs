@@ -1118,6 +1118,171 @@ async function t13() {
     JSON.stringify({ en: en.meta.title, zh: zh.meta.title }))
 }
 
+// ================= T14 浏览器组件渲染（回归：useRef({}) 初值为真 → 默认状态永不建立 → 首帧崩溃） =================
+// 客户端组件此前从未被渲染测试过：settings.section 首帧就读 st.hosts.map，而 useRef({}) 让
+// `stateRef.current || { hosts: [] ... }` 永不生效 → React 子树整体抛错 → 设置页白板；
+// 头部胶囊展开浮窗读 st.probing 也是同一个雷。这里用零依赖 hook 桩渲染组件树并模拟点击。
+function t14Hooks() {
+  const refs = []
+  let idx = 0
+  return {
+    refs,
+    useState: (init) => [init, () => {}],
+    useRef: (init) => { const i = idx++; if (!(i in refs)) refs[i] = { current: init }; return refs[i] },
+    useCallback: (fn) => fn,
+    useEffect: (fn) => { fn() },
+    reset: () => { idx = 0 },
+  }
+}
+
+function t14React(hooks) {
+  return {
+    createElement(type, props) {
+      const children = Array.prototype.slice.call(arguments, 2)
+      return { type, props: Object.assign({}, props || {}, { children }) }
+    },
+    useState: hooks.useState,
+    useRef: hooks.useRef,
+    useCallback: hooks.useCallback,
+    useEffect: hooks.useEffect,
+  }
+}
+
+function t14Walk(node, visit) {
+  if (Array.isArray(node)) { node.forEach(k => t14Walk(k, visit)); return } // h('tbody', null, rows) 会包成嵌套数组
+  if (!node || typeof node !== 'object') return
+  visit(node)
+  const kids = node.props && node.props.children
+  if (kids !== undefined) t14Walk(kids, visit)
+}
+
+function t14Strings(node, out = []) {
+  if (Array.isArray(node)) { node.forEach(k => t14Strings(k, out)); return out }
+  if (typeof node === 'string') { out.push(node); return out }
+  if (!node || typeof node !== 'object') return out
+  const kids = node.props && node.props.children
+  if (kids !== undefined) t14Strings(kids, out)
+  return out
+}
+
+/** 收集某个 prop 的取值（主机名/地址等在表格里是 input 的 value，不是文本节点）。 */
+function t14PropValues(node, prop, out = []) {
+  t14Walk(node, (n) => { if (n.props && n.props[prop] !== undefined) out.push(n.props[prop]) })
+  return out
+}
+
+function t14Count(node, type) {
+  let n = 0
+  t14Walk(node, (x) => { if (x.type === type) n += 1 })
+  return n
+}
+
+function t14Button(node, label) {
+  let found
+  t14Walk(node, (n) => {
+    if (found === undefined && n.type === 'button' && t14Strings(n).includes(label)) found = n
+  })
+  return found
+}
+
+/** 渲染一次组件：hook 索引归零，ref 对象跨渲染保持（与 React 的组件实例语义一致）。 */
+function t14Render(hooks, Comp, props) {
+  hooks.reset()
+  return Comp(props)
+}
+
+/** 在受控沙箱里执行客户端源码，取出 factory 注册出来的组件。 */
+function t14LoadClient(source, hooks, fetchImpl) {
+  const captured = { mod: null }
+  const fn = new Function('window', 'fetch', 'console', 'setTimeout', 'clearTimeout', 'Blob', 'URL', 'document', source)
+  fn(
+    { __ModuleLoader__: { load: (m) => { captured.mod = m } } },
+    fetchImpl, console, setTimeout, clearTimeout,
+    class {}, { createObjectURL: () => 'blob:x', revokeObjectURL() {} }, { createElement: () => ({ click() {} }) },
+  )
+  const mod = captured.mod.factory((name) => {
+    if (name === 'react') return t14React(hooks)
+    throw new Error('未预期的 require: ' + name)
+  })
+  const comps = {}
+  const keys = []
+  mod.apply({ slots: { inject: (key, cb) => { keys.push(key); cb() }, register: (opts, Comp) => { comps[opts.name] = Comp; return () => {} } } })
+  return { comps, keys, id: captured.mod.id }
+}
+
+async function t14() {
+  console.log('== T14 浏览器组件渲染 ==')
+  const root = path.dirname(path.dirname(new URL(import.meta.url).pathname))
+  const source = fs.readFileSync(path.join(root, 'client/index.js'), 'utf8')
+  const hostsBody = { ok: true, value: [{ id: 'm1', name: '主机一', host: '10.0.0.1', user: 'root', port: 22, source: 'dynamic' }] }
+  const okFetch = (url) => Promise.resolve({
+    json: () => Promise.resolve(String(url).includes('/status')
+      ? { ok: true, value: { hosts: [{ id: 'm1', name: '主机一' }], connections: [] } }
+      : hostsBody),
+  })
+  const badFetch = () => Promise.reject(new Error('offline'))
+
+  const CHIP = 'conversation.session.header.utilities'
+  const SECTION = 'settings.section'
+
+  const chipHooks = t14Hooks()
+  const chip = t14LoadClient(source, chipHooks, okFetch)
+  const setHooks = t14Hooks()
+  const settings = t14LoadClient(source, setHooks, okFetch)
+  const badHooks = t14Hooks()
+  const bad = t14LoadClient(source, badHooks, badFetch)
+
+  check('T14.1 客户端以 dsh-ssh-remote 注册并注入两个槽位',
+    chip.id === 'dsh-ssh-remote' && chip.keys.length === 2 && chip.keys.includes(CHIP) && chip.keys.includes(SECTION),
+    chip.id + ' [' + chip.keys.join(', ') + ']')
+
+  // --- 会话头部胶囊 ---
+  let chipTree, chipErr
+  try { chipTree = t14Render(chipHooks, chip.comps[CHIP], {}) } catch (e) { chipErr = e }
+  check('T14.2 头部胶囊首帧渲染不抛错', chipErr === undefined && t14Strings(chipTree).includes('SSH'), chipErr && chipErr.message)
+
+  let openErr, openTree
+  try {
+    await sleep(5)
+    chipTree = t14Render(chipHooks, chip.comps[CHIP], {})
+    chipHooks.refs[0].current = { getBoundingClientRect: () => ({ bottom: 40, right: 500 }) } // wrapRef：让浮窗拿到定位
+    chipTree.props.onClick()
+    openTree = t14Render(chipHooks, chip.comps[CHIP], {})
+  } catch (e) { openErr = e }
+  check('T14.3 展开胶囊浮窗（读 st.probing）不抛错且渲染出主机行',
+    openErr === undefined && t14Strings(openTree).join('|').includes('连通性'), openErr && openErr.message)
+
+  // --- 设置页 ---
+  let setTree, setErr
+  try { setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} }) } catch (e) { setErr = e }
+  check('T14.4 设置页首帧渲染不抛错（useRef 初值回归）', setErr === undefined, setErr && setErr.message)
+
+  const bar = t14Strings(setTree).join('|')
+  check('T14.5 设置页渲染出工具栏', bar.includes('+ 新增主机') && bar.includes('批量导入') && bar.includes('导出 JSON'), bar.slice(0, 70))
+  check('T14.6 设置页渲染出表格且初始只有表头', t14Count(setTree, 'table') === 1 && t14Count(setTree, 'tr') === 1, 'tr=' + t14Count(setTree, 'tr'))
+
+  let addErr
+  try { t14Button(setTree, '+ 新增主机').props.onClick(); setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} }) } catch (e) { addErr = e }
+  check('T14.7 点「+ 新增主机」后表格新增一行（st.hosts 可用）', addErr === undefined && t14Count(setTree, 'tr') === 2, addErr && addErr.message)
+
+  let impErr
+  try { t14Button(setTree, '批量导入').props.onClick(); setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} }) } catch (e) { impErr = e }
+  check('T14.8 展开批量导入区不抛错', impErr === undefined && t14Count(setTree, 'textarea') === 1, impErr && impErr.message)
+
+  await sleep(5)
+  setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  const cells = t14PropValues(setTree, 'value').map(String)
+  check('T14.9 宿主数据回填后表格渲染出该主机', t14Count(setTree, 'tr') === 2 && cells.includes('主机一') && cells.includes('10.0.0.1'),
+    'tr=' + t14Count(setTree, 'tr') + ' cells=' + JSON.stringify(cells.slice(0, 4)))
+
+  let badErr, badTree
+  try { badTree = t14Render(badHooks, bad.comps[SECTION], { close() {} }); await sleep(5); badTree = t14Render(badHooks, bad.comps[SECTION], { close() {} }) } catch (e) { badErr = e }
+  check('T14.10 宿主 API 不可达时降级提示而不崩', badErr === undefined && t14Strings(badTree).join('|').includes('host api unavailable'), badErr && badErr.message)
+
+  const code = source.split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
+  check('T14.11 客户端不再出现 useRef({}) 真值初值', !/useRef\(\{\}\)/.test(code))
+}
+
 const keepAlive = setInterval(() => {}, 1000)
 async function main() {
   await t2()
@@ -1132,6 +1297,7 @@ async function main() {
   await t11()
   await t12()
   await t13()
+  await t14()
   clearInterval(keepAlive)
   summary()
 }

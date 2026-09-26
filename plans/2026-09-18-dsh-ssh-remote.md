@@ -2,10 +2,13 @@
 
 > **状态（2026-09-26）：已实施完成并通过验收。** 本文件保留为设计/实施记录，下方
 > 复选框是当时的推进清单，未逐项回填——以代码与测试为准：
-> `npm run typecheck` + `npm test`（182 断言，T2–T13）。
+> `npm run typecheck` + `npm test`（193 断言，T2–T14）。
 > 同日完成 dsh 0.1.7-rc.2 世代对齐（v0.1.2）：peer 范围重写、`client.inject` 清理、
 > HTTP handler 收敛为 `(req, res)`、工具卡片呈现、manifest 现代化（`manifestVersion`
 > + 本地化标题/图标），详见 README「版本兼容」与「开发」两节。
+> 当日 dev 环境实测补修：客户端两处 `useRef({})` 真值初值令默认状态永不建立，
+> 设置页/胶囊浮窗首帧即抛 `undefined.map`（设置页表现为白板）；新增 T14 浏览器组件
+> 渲染回归（零依赖 hook 桩渲染 + 模拟点击，回退修复可复现崩溃）。
 
 **Goal:** 在本仓库构建 DSH 插件 `ssh-remote`：10 个 ssh_* Agent 工具（执行/读/写/编辑/搜索/推拉）+ ControlMaster 连接层 + 状态胶囊面板 + 设置页可视化配置。
 
