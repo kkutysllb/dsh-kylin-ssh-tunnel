@@ -509,8 +509,11 @@ window.__ModuleLoader__.load({
 
     function SshDirectoryFlow(props) {
       var open = props.open, busy = props.busy
-      var st = useState({ source: 'local', hosts: [], worlds: [], log: null, busy: false, error: null })[0]
-      var set = useState(null)[1]
+      // 值域与 setter 必须来自**同一次** useState：拆成两次调用时 setter 属于
+      // 另一个单元，状态永远不更新（只重渲染）——2026-09-26 实机踩到。
+      var pair = useState({ source: 'local', hosts: [], worlds: [], log: null, busy: false, error: null, detail: null })
+      var st = pair[0]
+      var set = pair[1]
       var render = function (patch) { set(function (s) { return Object.assign({}, s, patch) }) }
       useEffect(function () {
         if (!open) return
