@@ -21,14 +21,16 @@
     "README.md"
   ],
   "scripts": {
-    "typecheck": "node --check lib/index.js && node --check client/index.js && node --check lib/hosts.js && node --check lib/settings-store.js && node --check lib/connection.js && node --check lib/exec.js && node --check lib/fsops.js && node --check lib/transfer.js",
+    "typecheck": "node --check lib/index.js && node --check client/index.js && node --check lib/hosts.js && node --check lib/settings-store.js && node --check lib/connection.js && node --check lib/exec.js && node --check lib/fsops.js && node --check lib/transfer.js && node --check lib/credentials.js && node --check lib/askpass.js",
     "test": "node scripts/smoke-test.mjs",
     "live": "node scripts/live-test.mjs",
     "setup-dev": "node scripts/setup-dev.mjs"
   },
   "dsh": {
     "manifestVersion": 1,
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots",
@@ -40,7 +42,9 @@
   },
   "qilin": {
     "manifestVersion": 1,
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots",

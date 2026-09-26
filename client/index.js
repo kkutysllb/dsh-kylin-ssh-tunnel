@@ -34,6 +34,10 @@ window.__ModuleLoader__.load({
       return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then(function (r) { return r.json() })
     }
 
+    function putJson(url, body) {
+      return fetch(url, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then(function (r) { return r.json() })
+    }
+
     function SshRemoteUtility() {
       var wrapRef = useRef(null)
       // useRef(null)：初值必须是假值，下面的 `|| 默认状态` 才会生效（useRef({}) 永远为真值，
@@ -200,7 +204,7 @@ window.__ModuleLoader__.load({
       // 同上：初值必须是假值，默认状态才有机会建立（否则 st.hosts 为 undefined，首帧即崩）。
       var stateRef = useRef(null)
       var render = useState(0)[1]
-      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false }
+      stateRef.current = stateRef.current || { hosts: [], dirty: false, msg: null, err: null, importOpen: false, importFormat: 'sshconfig', importText: '', importPreview: null, saving: false, pw: {} }
 
       var load = useCallback(function () {
         fetch('/ssh-remote/api/hosts').then(function (r) { return r.json() }).then(function (res) {
@@ -221,7 +225,7 @@ window.__ModuleLoader__.load({
       }
       function addRow() {
         var st = stateRef.current
-        st.hosts.push({ id: '', name: '', host: '', user: 'root', port: 22, identityFile: '', jump: '', defaultCwd: '', source: 'dynamic' })
+        st.hosts.push({ id: '', name: '', host: '', user: 'root', port: 22, auth: 'key', identityFile: '', jump: '', defaultCwd: '', source: 'dynamic' })
         st.dirty = true
         render(function (n) { return n + 1 })
       }
@@ -262,6 +266,27 @@ window.__ModuleLoader__.load({
           render(function (n) { return n + 1 })
         }).catch(function () { st.err = '导入请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
       }
+      function savePw(i) {
+        var st = stateRef.current
+        var row = st.hosts[i]
+        var value = (st.pw[i] && st.pw[i].value) || ''
+        if (!row.user || !row.host) { st.err = '请先填写「用户」与「主机」，再设置密码'; render(function (n) { return n + 1 }); return }
+        if (!value) { st.err = '密码不能为空'; render(function (n) { return n + 1 }); return }
+        putJson('/ssh-remote/api/credentials', { user: row.user, host: row.host, password: value }).then(function (res) {
+          if (res && res.ok) { row.hasPassword = true; st.pw[i] = null; st.err = null; st.msg = '密码已写入加密凭据库（' + row.user + '@' + row.host + '）' }
+          else st.err = (res && res.error && res.error.message) || '密码保存失败'
+          render(function (n) { return n + 1 })
+        }).catch(function () { st.err = '密码保存请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
+      }
+      function clearPw(i) {
+        var st = stateRef.current
+        var row = st.hosts[i]
+        fetch('/ssh-remote/api/credentials/' + encodeURIComponent(row.user + '@' + row.host), { method: 'DELETE' }).then(function (r) { return r.json() }).then(function (res) {
+          if (res && res.ok) { row.hasPassword = false; st.msg = '已清除该主机的密码凭据' }
+          else st.err = (res && res.error && res.error.message) || '清除失败'
+          render(function (n) { return n + 1 })
+        }).catch(function () { st.err = '请求失败（host api unavailable）'; render(function (n) { return n + 1 }) })
+      }
       function exportJson() {
         var blob = new Blob([JSON.stringify(stateRef.current.hosts, null, 2)], { type: 'application/json' })
         var a = document.createElement('a')
@@ -273,6 +298,58 @@ window.__ModuleLoader__.load({
 
       var st = stateRef.current
       var canSave = st.dirty && !st.saving
+
+      function authField(row, i) {
+        return h('label', { key: 'auth', style: SS.field },
+          h('span', { style: SS.fieldLabel }, '登录方式'),
+          h('select', {
+            style: Object.assign({}, SS.input, { width: 130 }),
+            className: 'dsshr-input',
+            value: row.auth || 'agent',
+            onChange: function (e) { setCell(i, 'auth', e.target.value) },
+          },
+            h('option', { value: 'key' }, '私钥'),
+            h('option', { value: 'password' }, '密码'),
+            h('option', { value: 'agent' }, 'agent/config')
+          )
+        )
+      }
+      function pwField(row, i) {
+        var st = stateRef.current
+        var edit = st.pw[i]
+        return h('div', { key: 'pw', style: SS.field },
+          h('span', { style: SS.fieldLabel }, '登录密码'),
+          edit && edit.editing
+            ? h('div', { style: { display: 'flex', gap: 6, minWidth: 0 } },
+                h('input', {
+                  style: Object.assign({}, SS.input, { width: 150 }),
+                  className: 'dsshr-input',
+                  type: 'password',
+                  value: edit.value,
+                  placeholder: '仅写入加密凭据库',
+                  onChange: function (e) { st.pw[i] = { editing: true, value: e.target.value }; render(function (n) { return n + 1 }) },
+                }),
+                h('button', { type: 'button', style: SS.btnPrimary, className: 'dsshr-btn-primary', onClick: function () { savePw(i) } }, '保存'),
+                h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { st.pw[i] = null; render(function (n) { return n + 1 }) } }, '取消')
+              )
+            : h('div', { style: { display: 'flex', gap: 6, minWidth: 0 } },
+                h('button', { type: 'button', style: SS.btn, className: 'dsshr-btn', onClick: function () { st.pw[i] = { editing: true, value: '' }; render(function (n) { return n + 1 }) } }, row.hasPassword ? '已设置 · 更换' : '设置密码'),
+                row.hasPassword && h('button', { type: 'button', style: SS.btnDanger, className: 'dsshr-btn-danger', onClick: function () { clearPw(i) } }, '清除')
+              )
+        )
+      }
+      function fieldsOf(row, i) {
+        var byKey = {}
+        FIELDS.forEach(function (f) { byKey[f.key] = f })
+        var out = [fieldOf(row, i, byKey.name), fieldOf(row, i, byKey.host), fieldOf(row, i, byKey.user), fieldOf(row, i, byKey.port)]
+        out.push(authField(row, i))
+        if (row.auth === 'key') out.push(fieldOf(row, i, byKey.identityFile))
+        if (row.auth === 'password') out.push(pwField(row, i))
+        out.push(fieldOf(row, i, byKey.jump))
+        out.push(fieldOf(row, i, byKey.defaultCwd))
+        out.push(fieldOf(row, i, byKey.id))
+        return out
+      }
 
       function fieldOf(row, i, f) {
         var editable = row.source !== 'static' && f.key !== 'id'
@@ -306,7 +383,7 @@ window.__ModuleLoader__.load({
                   ? h('span', { style: SS.hint }, '来自 cordis.patch.yml')
                   : h('button', { type: 'button', style: SS.btnDanger, className: 'dsshr-btn-danger', onClick: function () { delRow(i) } }, '删除')
               ),
-              h('div', { style: SS.grid }, FIELDS.map(function (f) { return fieldOf(row, i, f) })),
+              h('div', { style: SS.grid }, fieldsOf(row, i)),
               row.source === 'static' && h('div', { style: SS.hint }, '静态主机不可在此编辑或删除。')
             )
           }),

@@ -1295,6 +1295,137 @@ async function t14() {
   check('T14.13 :hover/:focus 样式表去重注入', settings.injected.length === 1
     && css.includes('.dsshr-btn-primary:hover') && css.includes(':focus-visible') && css.includes('prefers-reduced-motion'),
     'injected=' + settings.injected.length)
+
+  // ── 登录方式与密码 UI：密码只进加密库，永不回显/落 DOM 值 ──
+  setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  t14Button(setTree, '+ 新增主机').props.onClick()
+  setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  const authText = t14Strings(setTree).join('|')
+  check('T14.14 新增行渲染「登录方式」与私钥路径', authText.includes('登录方式') && authText.includes('私钥路径'), authText.slice(0, 120))
+
+  let selErr
+  try {
+    let hostInput
+    t14Walk(setTree, (n) => { if (hostInput === undefined && n.type === 'input' && n.props.placeholder === 'IP 或域名') hostInput = n })
+    hostInput.props.onChange({ target: { value: '10.1.2.3' } })
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+    let sel
+    t14Walk(setTree, (n) => { if (sel === undefined && n.type === 'select') sel = n })
+    sel.props.onChange({ target: { value: 'password' } })
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  } catch (e) { selErr = e }
+  const pwText = t14Strings(setTree).join('|')
+  const modeVals = t14PropValues(setTree, 'value').map(String)
+  check('T14.15 切到密码模式显示密码控件', selErr === undefined && pwText.includes('登录密码') && pwText.includes('设置密码') && modeVals.includes('password'), pwText.slice(0, 120))
+
+  let pwErr
+  try {
+    t14Button(setTree, '设置密码').props.onClick()
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+    let pwInput
+    t14Walk(setTree, (n) => { if (pwInput === undefined && n.type === 'input' && n.props.type === 'password') pwInput = n })
+    pwInput.props.onChange({ target: { value: 'pw-机密-123' } })
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+    t14Button(setTree, '保存').props.onClick()
+    await sleep(5)
+    setTree = t14Render(setHooks, settings.comps[SECTION], { close() {} })
+  } catch (e) { pwErr = e }
+  const afterPw = t14Strings(setTree).join('|')
+  const afterVals = t14PropValues(setTree, 'value').map(String)
+  check('T14.16 密码输入为 password 型且保存后清空', pwErr === undefined && !afterVals.includes('pw-机密-123'), JSON.stringify(afterVals.slice(0, 4)))
+  check('T14.17 保存后给出加密库提示且未回显密码', afterPw.includes('加密凭据库') && afterPw.includes('root@10.1.2.3') && !afterPw.includes('pw-机密-123'), afterPw.slice(0, 140))
+}
+
+
+// ================= T15 加密凭据库（credentials.js） =================
+import * as crypto from 'node:crypto'
+import { CredentialStore, identityOf } from '../lib/credentials.js'
+
+async function t15() {
+  console.log('== T15 加密凭据库 ==')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t15-'))
+  const file = path.join(tmp, 'credentials.enc')
+  const keyFile = path.join(tmp, 'credentials.key')
+  const store = new CredentialStore({ file, keyFile })
+
+  check('T15.1 identityOf 形态（供 askpass 反查）', identityOf('root', '10.0.0.1') === 'root@10.0.0.1', identityOf('root', '10.0.0.1'))
+  check('T15.2 未存时 has/get 均为空', store.has('root@10.0.0.1') === false && store.get('root@10.0.0.1') === null)
+
+  store.set('root@10.0.0.1', 's3cret-密码')
+  check('T15.3 写入后可取回（含非 ASCII）', store.get('root@10.0.0.1') === 's3cret-密码')
+  check('T15.4 has 判定', store.has('root@10.0.0.1') === true)
+
+  const raw = fs.readFileSync(file, 'utf8')
+  check('T15.5 密文文件不含明文', !raw.includes('s3cret') && !raw.includes('密码'), raw.slice(0, 90))
+  check('T15.6 密钥文件已生成且 0600', fs.existsSync(keyFile) && (fs.statSync(keyFile).mode & 0o777) === 0o600, (fs.statSync(keyFile).mode & 0o777).toString(8))
+  check('T15.7 密文文件 0600', (fs.statSync(file).mode & 0o777) === 0o600, (fs.statSync(file).mode & 0o777).toString(8))
+
+  store.set('u2@h2', 'second')
+  check('T15.8 多条并存', store.get('u2@h2') === 'second' && store.get('root@10.0.0.1') === 's3cret-密码')
+  store.remove('root@10.0.0.1')
+  check('T15.9 删除单条不影响其它', store.has('root@10.0.0.1') === false && store.get('u2@h2') === 'second')
+  check('T15.10 list 只有身份不含密码', JSON.stringify(store.list()) === JSON.stringify(['u2@h2']), JSON.stringify(store.list()))
+
+  fs.writeFileSync(keyFile, crypto.randomBytes(32))
+  check('T15.11 自管密钥被换后解不开（返回 null 不抛错）', store.get('u2@h2') === null)
+}
+
+// ================= T16 登录方式参数（connection.js） =================
+async function t16() {
+  console.log('== T16 登录方式参数 ==')
+  const conn = new ConnectionManager({})
+  const key = { id: 'k', user: 'root', host: 'a', identityFile: '/k/id', auth: 'key', connectTimeoutSec: 15 }
+  const agent = { id: 'g', user: 'root', host: 'b', identityFile: '', auth: 'agent', connectTimeoutSec: 15 }
+  const pw = { id: 'p', user: 'root', host: 'c', identityFile: '', auth: 'password', connectTimeoutSec: 15 }
+
+  const keyArgs = conn.baseArgs(key)
+  check('T16.1 key：带 -i 与 BatchMode', keyArgs.includes('-i') && keyArgs.includes('/k/id') && keyArgs.includes('BatchMode=yes'), keyArgs.join(' '))
+  const agentArgs = conn.baseArgs(agent)
+  check('T16.2 agent：不传 -i（走 agent/config/默认密钥），保留 BatchMode', !agentArgs.includes('-i') && agentArgs.includes('BatchMode=yes'), agentArgs.join(' '))
+  const pwArgs = conn.baseArgs(pw)
+  check('T16.3 password：强制密码/键盘交互、禁公钥', pwArgs.includes('PreferredAuthentications=password,keyboard-interactive') && pwArgs.includes('PubkeyAuthentication=no'), pwArgs.join(' '))
+  check('T16.4 password：不设 BatchMode（BatchMode 会连 SSH_ASKPASS 一起禁掉）', !pwArgs.includes('BatchMode=yes'))
+  check('T16.5 scp 同口径', conn.scpArgs(pw).includes('PubkeyAuthentication=no') && !conn.scpArgs(agent).includes('-i'))
+  check('T16.6 check/exit 同口径', conn.checkArgs(pw).includes('PubkeyAuthentication=no') && conn.checkArgs(key).includes('/k/id'))
+}
+
+// ================= T17 凭据 API（HTTP） =================
+async function t17() {
+  console.log('== T17 凭据 API ==')
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ssh-remote-t17-'))
+  const hostsFile = path.join(tmpDir, 'hosts.json')
+  const ctx = fakeCtx()
+  const inst = apply(ctx, { hosts: [{ id: 'h1', name: '密码机', host: '9.9.9.9', user: 'root', auth: 'password' }], hostsFile })
+  const mkRes = () => { const r = {}; r.writeHead = (s) => { r.status = s }; r.end = (b) => { r.body = b }; return r }
+  const api = inst.handleApi
+  const H = { host: '127.0.0.1:1' }
+
+  check('T17.1 askpass 包装脚本生成在数据目录', fs.existsSync(path.join(tmpDir, 'askpass.sh')), tmpDir)
+  const sh = fs.readFileSync(path.join(tmpDir, 'askpass.sh'), 'utf8')
+  check('T17.2 包装脚本带凭据库与密钥路径', sh.includes('askpass.js') && sh.includes('credentials.enc') && sh.includes('credentials.key'), sh.trim())
+
+  const resPut = mkRes()
+  api({ method: 'PUT', url: '/ssh-remote/api/credentials', headers: H }, resPut, JSON.stringify({ user: 'root', host: '9.9.9.9', password: 'pw1' }))
+  await sleep(20)
+  const putBody = JSON.parse(resPut.body)
+  check('T17.3 PUT 写入凭据', resPut.status === 200 && putBody.value.hasPassword === true && putBody.value.identity === 'root@9.9.9.9', resPut.body)
+
+  const resList = mkRes()
+  api({ method: 'GET', url: '/ssh-remote/api/hosts', headers: H }, resList)
+  await sleep(20)
+  const list = JSON.parse(resList.body).value
+  check('T17.4 主机列表标注 hasPassword 与 auth', list.length === 1 && list[0].hasPassword === true && list[0].auth === 'password', resList.body.slice(0, 140))
+  check('T17.5 列表响应不含密码明文', !resList.body.includes('pw1'), resList.body.slice(0, 140))
+
+  const resDel = mkRes()
+  api({ method: 'DELETE', url: '/ssh-remote/api/credentials/' + encodeURIComponent('root@9.9.9.9'), headers: H }, resDel)
+  await sleep(20)
+  check('T17.6 DELETE 清除凭据', resDel.status === 200 && JSON.parse(resDel.body).value.removed === true, resDel.body)
+
+  const resBad = mkRes()
+  api({ method: 'PUT', url: '/ssh-remote/api/credentials', headers: H }, resBad, JSON.stringify({ user: 'root', host: 'x' }))
+  await sleep(20)
+  check('T17.7 缺密码 400', resBad.status === 400, String(resBad.status))
 }
 
 const keepAlive = setInterval(() => {}, 1000)
@@ -1312,7 +1443,12 @@ async function main() {
   await t12()
   await t13()
   await t14()
+  await t15()
+  await t16()
+  await t17()
   clearInterval(keepAlive)
   summary()
+  // fs.watch（HostRegistry.startWatch）会吊住事件循环，主动收尾退出
+  process.exit(failed > 0 ? 1 : 0)
 }
 main().catch(err => { console.error(err); process.exit(1) })

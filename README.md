@@ -31,13 +31,40 @@ dsh plugin --profile web add dsh-ssh-remote
         host: 203.0.113.10
         user: root            # 默认 root
         port: 22              # 默认 22
-        identityFile: ~/.ssh/id_ed25519
+        auth: key             # 可选：key（默认，有私钥路径即此模式）/ agent / password
+        identityFile: ~/.ssh/id_ed25519   # key 模式用；agent/password 模式可留空
         jump: bastion         # 可选：跳板（引用另一主机 id → ssh -J）
         defaultCwd: /srv/app  # 可选
     commandTimeoutMs: 60000
 ```
 
 动态主机：设置页「SSH 远程主机」区块添加/导入，写入 `~/.dsh/ssh-remote/hosts.json`，**热生效**。
+
+## 登录方式与凭据（v0.1.2 起）
+
+主机卡片的「登录方式」三选一：
+
+| 方式 | 行为 | 适用 |
+| --- | --- | --- |
+| `key` | `ssh -i <私钥路径>` + `BatchMode=yes` | 有专属私钥（默认；填了私钥路径即此模式） |
+| `agent` | 不传 `-i`，交给 `~/.ssh/config` / ssh-agent / 默认密钥 | 密钥已在 agent、或写在 ssh config 里 |
+| `password` | 强制密码认证（禁公钥），密码经 `SSH_ASKPASS` 注入 | 只允许密码登录的机器 |
+
+**密码的存放与取用**
+
+- 密码只存加密凭据库 `credentials.enc`（AES-256-GCM 逐条加密，与 hostsFile 同目录）；
+  **不进 `hosts.json`、不进工具输出/日志/导出 JSON**（接口响应也永不回显）
+- 主密钥是「自管」的 32 字节文件 `credentials.key`（0600）；可用
+  `ssh-remote.config.credentialsKeyFile` 挪到任意位置（U 盘/私有目录）
+- ⚠️ **丢了密钥文件 = 已存密码不可解**（重设密码即可）；密钥若与密文同目录，防护主要靠
+  文件权限——在意的话请把密钥挪到别处并自行备份
+- 连接时由 `askpass.sh`（0700）回调 `lib/askpass.js` 解密，把密码交给 ssh；密码不进命令行、
+  不进环境变量；`ControlMaster` 让每次任务只在建连时取一次密码
+- 设置页密码输入为 `type=password`，保存后立即清空、不回填
+
+**明确不支持**：键盘交互 2FA（Google Authenticator 等）——那是逐次交互输入，无人值守通道无解；
+遇到会直接认证失败（不会挂死，由 `SSH_ASKPASS_REQUIRE=force` 保证非交互）。
+跳板链上的密码暂未启用（凭据按 `user@host` 存取，将来可直接支持每跳独立凭据）。
 
 ## 版本兼容（dsh 0.1.7 世代起）
 
