@@ -1520,6 +1520,22 @@ async function t19() {
   }))
   const r2 = await c2.ensureMaster(H19)
   check('T19.4 空 stderr 时给出退出码而非含糊文案', r2.ok === false && /exit 255/.test(String(r2.error)), String(r2.error))
+
+  // ControlPersist 语义：master daemon 化后前台进程以 0 退出 —— 这是成功不是失败
+  const log3 = []
+  let checks = 0
+  const c3 = new ConnectionManager(connOpts(log3, {
+    spawnFn: (cmd, args, o) => {
+      const child = fakeChild(9000 + log3.length)
+      log3.push({ cmd, args, opts: o, child })
+      if (args.includes('check')) setTimeout(() => child.emitClose(checks++ === 0 ? 255 : 0), 5)
+      else if (args.includes('-N')) setTimeout(() => { child.emitExit(0); child.emitClose(0) }, 10) // daemon 化
+      else setTimeout(() => child.emitClose(0), 5)
+      return child
+    },
+  }))
+  const r3 = await c3.ensureMaster(H19)
+  check('T19.5 master exit 0（daemon 化）不得判失败', r3.ok === true, JSON.stringify(r3))
 }
 
 const keepAlive = setInterval(() => {}, 1000)
