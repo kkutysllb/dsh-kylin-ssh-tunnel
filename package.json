@@ -25,7 +25,9 @@
     "test": "node scripts/smoke-test.mjs",
     "live": "node scripts/live-test.mjs",
     "setup-dev": "node scripts/setup-dev.mjs",
-    "provision": "node scripts/provision-remote-world.mjs"
+    "provision": "node scripts/provision-remote-world.mjs",
+    "sync:mirror": "node scripts/sync-to-dsh-plugins.mjs",
+    "sync:check": "node scripts/sync-to-dsh-plugins.mjs --check"
   },
   "dsh": {
     "manifestVersion": 1,
